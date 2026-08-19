@@ -1,0 +1,99 @@
+# Diver detection model config
+# Captures every architecture/training decision made in the design conversation.
+
+DATA:
+  ROOT: "../dataset"          # relative to diver_net/ ; change to absolute path or Drive mount on Colab
+  VOXEL_SIZE: [0.2, 0.2, 0.2]
+  POINT_CLOUD_RANGE: [0.0, -11.4, -5.6, 16.2, 11.4, 5.6]   # xmin,ymin,zmin,xmax,ymax,zmax
+  # scene-level split, Person1+2 only (Person3/4 excluded: inconsistent rotation labels)
+  TEST_SCENES:  ["Person2/scene_0078"]
+  VAL_SCENES:
+    - "Person1/scene_0036"
+    - "Person1/scene_0063"
+    - "Person1/scene_0049"
+    - "Person2/scene_0076"
+    - "Person2/scene_0089"
+  TRAIN_SCENES:
+    - "Person1/scene_0000"
+    - "Person1/scene_0042"
+    - "Person1/scene_0044"
+    - "Person1/scene_0068"
+    - "Person2/scene_0009"
+    - "Person2/scene_0035"
+    - "Person2/scene_0050"
+    - "Person2/scene_0079"
+    - "Person2/scene_0091"
+  AUGMENTATION: false
+
+VFE:
+  NUM_POINT_FEATURES: 4        # x,y,z,intensity as read from disk
+  WITH_DISTANCE: false
+  USE_ABSOLUTE_XYZ: true
+  NUM_FILTERS: [64, 64]        # 2-layer PFN, 10D augmented input -> 64D output
+
+STEM:
+  IN_CHANNELS: 64
+  OUT_CHANNELS: 128
+  NUM_BASIC_BLOCKS: 3
+  DOWNSAMPLE_KERNEL: 3
+  DOWNSAMPLE_STRIDE: 2          # isotropic on x,y,z (NOT z-only like FSHNet original)
+
+BACKBONE:
+  NAME: SlotFormer
+  FEATURE_DIM: 128
+  WIN_SIZE: 12                  # in stem-output voxels (=2.4m at pre-stem resolution, 4.8m at stem-output resolution)
+  DIRECTIONS: [x, y, z]
+  NUM_CYCLES: 2                 # x,y,z repeated twice = 6 SFLayers total
+  ATTENTION: softmax             # NOT linear -- deliberate deviation from FSHNet original
+  POS_ENCODING:
+    TYPE: sinusoidal_sum         # per-axis full-width sin/cos encoding, summed (not concatenated)
+    TEMPERATURE: 10000
+  NUM_HEADS: 4
+
+DENSE_HEAD:
+  SHARED_CONV_CHANNELS: 128
+  CENTER_HEAD:
+    NUM_CONV: 2
+    OUTPUT_CHANNELS: 1
+    BIAS_INIT: focal             # bias = -log((1-0.01)/0.01)
+  OFFSET_HEAD:
+    NUM_CONV: 2
+    OUTPUT_CHANNELS: 3
+  BOX_HEAD:
+    NUM_CONV: 2
+    OUTPUT_CHANNELS: 7           # w,l,h,qw,qx,qy,qz
+
+ASSIGNER:
+  NAME: DynamicCornerAssign
+  CANDIDATE_POOL: all_active     # NOT top-5 like FSHNet -- use full active voxel set
+  CLS_WEIGHT: 1.0
+  REG_WEIGHT: 3.0
+  REG_COST: corner_distance      # fixed local-index correspondence, NOT RWIoU (quaternion-incompatible)
+  MIN_POSITIVES: 1
+
+LOSS:
+  WEIGHTS:
+    center: 1.0
+    corner_aux: 0.5
+    offset: 1.0
+    size: 1.0                    # log-scale L1
+    rotation: 1.0                 # double-cover-safe quaternion loss
+  FOCAL_ALPHA: 2
+  FOCAL_BETA: 4
+
+OPTIMIZATION:
+  OPTIMIZER: adamw_onecycle
+  LR: 0.003
+  WEIGHT_DECAY: 0.01
+  MOMS: [0.95, 0.85]
+  PCT_START: 0.1
+  DIV_FACTOR: 100
+  GRAD_NORM_CLIP: 10
+  BATCH_SIZE: 4
+  NUM_EPOCHS: 20
+  CKPT_EVERY_N_EPOCHS: 1
+  CKPT_EVERY_N_STEPS: 500        # extra safety checkpoint mid-epoch
+  NUM_WORKERS: 4
+
+POST_PROCESSING:
+  NMS: false                     # explicit user request -- raw decoded peaks only

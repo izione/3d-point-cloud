@@ -1,0 +1,9 @@
+# No spconv / torch_scatter dependency on purpose: both need a matching CUDA build
+# and routinely fail to install cleanly on Colab. Everything sparse-related is
+# implemented with core PyTorch ops (scatter_reduce_, index_add_) instead, so
+# this runs anywhere torch runs -- including local CPU for testing.
+
+torch>=2.0
+pyyaml
+tqdm
+numpy

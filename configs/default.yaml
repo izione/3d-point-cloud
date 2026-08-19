@@ -1,5 +1,10 @@
 # Diver detection model config
 # Captures every architecture/training decision made in the design conversation.
+#
+# NOTE: some fields below are marked "# [not read by code]" -- they document a
+# decision but the actual behavior is hardcoded in the corresponding .py file
+# (matches what's written here, but editing the value here does nothing; edit
+# the .py file instead). Everything else IS actually read from this file.
 
 DATA:
   ROOT: "../dataset"          # relative to diver_net/ ; change to absolute path or Drive mount on Colab
@@ -23,53 +28,53 @@ DATA:
     - "Person2/scene_0050"
     - "Person2/scene_0079"
     - "Person2/scene_0091"
-  AUGMENTATION: false
+  AUGMENTATION: false          # [not read by code] no augmentation is implemented at all -- nothing to toggle
 
 VFE:
-  NUM_POINT_FEATURES: 4        # x,y,z,intensity as read from disk
-  WITH_DISTANCE: false
-  USE_ABSOLUTE_XYZ: true
-  NUM_FILTERS: [64, 64]        # 2-layer PFN, 10D augmented input -> 64D output
+  NUM_FILTERS: [64, 64]        # 2-layer PFN, 10D augmented input -> 64D output -- actually read (models/vfe.py)
+  NUM_POINT_FEATURES: 4        # [not read by code] x,y,z,intensity -- fixed in models/vfe.py
+  WITH_DISTANCE: false         # [not read by code] fixed in models/vfe.py (10D = xyz+intensity+cluster_offset+center_offset, no distance term)
+  USE_ABSOLUTE_XYZ: true       # [not read by code] fixed in models/vfe.py
 
 STEM:
   IN_CHANNELS: 64
   OUT_CHANNELS: 128
   NUM_BASIC_BLOCKS: 3
   DOWNSAMPLE_KERNEL: 3
-  DOWNSAMPLE_STRIDE: 2          # isotropic on x,y,z (NOT z-only like FSHNet original)
+  DOWNSAMPLE_STRIDE: 2          # isotropic on x,y,z (NOT z-only like FSHNet original) -- all 5 fields above actually read (models/stem.py via detector.py)
 
 BACKBONE:
-  NAME: SlotFormer
-  FEATURE_DIM: 128
-  WIN_SIZE: 12                  # in stem-output voxels (=2.4m at pre-stem resolution, 4.8m at stem-output resolution)
-  DIRECTIONS: [x, y, z]
-  NUM_CYCLES: 2                 # x,y,z repeated twice = 6 SFLayers total
-  ATTENTION: softmax             # NOT linear -- deliberate deviation from FSHNet original
-  POS_ENCODING:
-    TYPE: sinusoidal_sum         # per-axis full-width sin/cos encoding, summed (not concatenated)
-    TEMPERATURE: 10000
-  NUM_HEADS: 4
+  FEATURE_DIM: 128              # actually read
+  WIN_SIZE: 12                  # actually read -- in stem-output voxels (=4.8m at stem-output resolution)
+  NUM_CYCLES: 2                 # actually read -- x,y,z repeated twice = 6 SFLayers total
+  NUM_HEADS: 4                  # actually read
+  NAME: SlotFormer              # [not read by code] descriptive only
+  DIRECTIONS: [x, y, z]         # [not read by code] direction cycling is hardcoded in models/slotformer.py
+  ATTENTION: softmax            # [not read by code] toggle is models/slotformer.py's ATTENTION_MODE module var, not this key
+  POS_ENCODING:                 # [not read by code] sinusoidal-sum PE is hardcoded in models/slotformer.py SFLayer
+    TYPE: sinusoidal_sum
+    TEMPERATURE: 10000           # matches the hardcoded default in SFLayer.__init__, but changing this value here does nothing
 
 DENSE_HEAD:
-  SHARED_CONV_CHANNELS: 128
   CENTER_HEAD:
-    NUM_CONV: 2
-    OUTPUT_CHANNELS: 1
-    BIAS_INIT: focal             # bias = -log((1-0.01)/0.01)
+    NUM_CONV: 2                  # actually read
+    OUTPUT_CHANNELS: 1           # actually read
+    BIAS_INIT: focal             # [not read by code] FOCAL_BIAS_INIT is hardcoded in models/heads.py
   OFFSET_HEAD:
-    NUM_CONV: 2
-    OUTPUT_CHANNELS: 3
+    NUM_CONV: 2                  # actually read
+    OUTPUT_CHANNELS: 3           # actually read
   BOX_HEAD:
-    NUM_CONV: 2
-    OUTPUT_CHANNELS: 7           # w,l,h,qw,qx,qy,qz
+    NUM_CONV: 2                  # actually read
+    OUTPUT_CHANNELS: 7           # actually read -- w,l,h,qw,qx,qy,qz
+  SHARED_CONV_CHANNELS: 128      # [not read by code] there is no separate shared trunk before the 3 heads
 
 ASSIGNER:
-  NAME: DynamicCornerAssign
-  CANDIDATE_POOL: all_active     # NOT top-5 like FSHNet -- use full active voxel set
-  CLS_WEIGHT: 1.0
-  REG_WEIGHT: 3.0
-  REG_COST: corner_distance      # fixed local-index correspondence, NOT RWIoU (quaternion-incompatible)
-  MIN_POSITIVES: 1
+  CLS_WEIGHT: 1.0                # actually read
+  REG_WEIGHT: 3.0                # actually read
+  MIN_POSITIVES: 1               # actually read
+  NAME: DynamicCornerAssign      # [not read by code] descriptive only
+  CANDIDATE_POOL: all_active     # [not read by code] always the full active-voxel set in models/assign.py (NOT top-5 like FSHNet)
+  REG_COST: corner_distance      # [not read by code] always corner-distance in models/assign.py (RWIoU is quaternion-incompatible)
 
 LOSS:
   WEIGHTS:
@@ -82,7 +87,6 @@ LOSS:
   FOCAL_BETA: 4
 
 OPTIMIZATION:
-  OPTIMIZER: adamw_onecycle
   LR: 0.003
   WEIGHT_DECAY: 0.01
   MOMS: [0.95, 0.85]
@@ -96,6 +100,7 @@ OPTIMIZATION:
   NUM_WORKERS: 1  # this Colab instance only got 2 CPU cores -- leave 1 for the
                   # main process. Try 2 and compare; more than that will just
                   # contend with itself, not help.
+  OPTIMIZER: adamw_onecycle      # [not read by code] AdamW + OneCycleLR is hardcoded in train.py
 
 POST_PROCESSING:
-  NMS: false                     # explicit user request -- raw decoded peaks only
+  NMS: false                     # [not read by code] no NMS is implemented at all (decode.py is local-max peaks only)

@@ -28,6 +28,10 @@ class DynamicLabelAssigner:
         return self.pc_range[:3].to(coords.device) + (xyz_idx + 0.5) * self.effective_voxel_size.to(coords.device)
 
     def assign(self, pred, coords, gt_boxes_list):
+        """When two GT objects are close enough that a voxel is a good candidate
+        for both, it goes to whichever one it's actually a better regression
+        match for (lowest cost), not whichever object happened to be processed
+        last in the loop below."""
         device = coords.device
         n = coords.shape[0]
         voxel_centers = self.voxel_world_centers(coords)
@@ -42,6 +46,7 @@ class DynamicLabelAssigner:
         target_quat = torch.zeros(n, 4, device=device)
         target_quat[:, 0] = 1.0
         assigned_gt = torch.full((n,), -1, dtype=torch.long, device=device)
+        best_cost = torch.full((n,), float("inf"), device=device)
 
         for b, gt_boxes in enumerate(gt_boxes_list):
             if gt_boxes.shape[0] == 0:
@@ -71,9 +76,17 @@ class DynamicLabelAssigner:
                 dynamic_k = max(self.min_positives, int(topq_vals.sum().floor().item()))
                 dynamic_k = min(dynamic_k, cost.shape[0])
 
-                _, topk_local = torch.topk(cost, dynamic_k, largest=False)
+                topk_costs, topk_local = torch.topk(cost, dynamic_k, largest=False)
                 sel = batch_idx[topk_local]
 
+                # only claim voxels this object beats the current owner on --
+                # a voxel already better-explained by another nearby object
+                # keeps that assignment instead of being blindly overwritten.
+                win = topk_costs < best_cost[sel]
+                sel = sel[win]
+                if sel.numel() == 0:
+                    continue
+                best_cost[sel] = topk_costs[win]
                 pos_mask[sel] = True
                 target_center[sel] = gt[:3]
                 target_size[sel] = gt[3:6]

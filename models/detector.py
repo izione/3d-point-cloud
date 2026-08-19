@@ -8,6 +8,7 @@ from .heads import DetectionHead
 from .assign import DynamicLabelAssigner
 from .losses import compute_total_loss
 from .sparse_ops import build_index_grid
+from data.dataset import voxelize_batch
 
 
 class DiverDetector(nn.Module):
@@ -30,10 +31,18 @@ class DiverDetector(nn.Module):
         self.assigner = DynamicLabelAssigner(cfg["ASSIGNER"], self.pc_range, self.voxel_size * self.stem_stride)
 
     def _to_device(self, batch, device):
+        # points/point_batch_idx move first; voxel_coords/point_voxel_idx are
+        # then computed *on device* (voxelize_batch does the coord math +
+        # torch.unique) instead of on the CPU dataloader worker -- see
+        # data/dataset.py for why (measured CPU-dataloading-bound, not
+        # compute-bound, especially with few CPU cores available).
+        points = batch["points"].to(device, non_blocking=True)
+        point_batch_idx = batch["point_batch_idx"].to(device, non_blocking=True)
+        voxel_coords, point_voxel_idx = voxelize_batch(points, point_batch_idx, self.pc_range, self.voxel_size, torch.tensor(self.grid_size, device=device))
         return {
-            "points": batch["points"].to(device),
-            "point_voxel_idx": batch["point_voxel_idx"].to(device),
-            "voxel_coords": batch["voxel_coords"].to(device),
+            "points": points,
+            "point_voxel_idx": point_voxel_idx,
+            "voxel_coords": voxel_coords,
             "gt_boxes": [g.to(device) for g in batch["gt_boxes"]],
             "batch_size": batch["batch_size"],
         }

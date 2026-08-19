@@ -93,7 +93,9 @@ OPTIMIZATION:
   NUM_EPOCHS: 20
   CKPT_EVERY_N_EPOCHS: 1
   CKPT_EVERY_N_STEPS: 500        # extra safety checkpoint mid-epoch
-  NUM_WORKERS: 4
+  NUM_WORKERS: 1  # this Colab instance only got 2 CPU cores -- leave 1 for the
+                  # main process. Try 2 and compare; more than that will just
+                  # contend with itself, not help.
 
 POST_PROCESSING:
   NMS: false                     # explicit user request -- raw decoded peaks only

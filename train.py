@@ -1,5 +1,4 @@
 import argparse
-import functools
 import time
 from pathlib import Path
 
@@ -14,13 +13,10 @@ from models.detector import DiverDetector
 
 def build_dataloader(cfg, split, batch_size, shuffle, num_workers):
     ds = SonarDiverDataset(cfg, split)
-    pc_range = cfg["DATA"]["POINT_CLOUD_RANGE"]
-    voxel_size = cfg["DATA"]["VOXEL_SIZE"]
-    grid_size = [round((pc_range[3 + i] - pc_range[i]) / voxel_size[i]) for i in range(3)]
-    cfn = functools.partial(collate_fn, pc_range=pc_range, voxel_size=voxel_size, grid_size=grid_size)
     return DataLoader(
         ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
-        collate_fn=cfn, drop_last=shuffle,  # drop_last only for train (shuffle=True)
+        collate_fn=collate_fn, drop_last=shuffle,  # drop_last only for train (shuffle=True)
+        pin_memory=True, persistent_workers=(num_workers > 0),
     )
 
 

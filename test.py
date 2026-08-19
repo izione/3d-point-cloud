@@ -1,5 +1,4 @@
 import argparse
-import functools
 import math
 
 import torch
@@ -83,12 +82,8 @@ def main():
     model = DiverDetector(cfg).to(device)
     model.load_state_dict(ckpt["model"])
 
-    pc_range = cfg["DATA"]["POINT_CLOUD_RANGE"]
-    voxel_size = cfg["DATA"]["VOXEL_SIZE"]
-    grid_size = [round((pc_range[3 + i] - pc_range[i]) / voxel_size[i]) for i in range(3)]
-    cfn = functools.partial(collate_fn, pc_range=pc_range, voxel_size=voxel_size, grid_size=grid_size)
     ds = SonarDiverDataset(cfg, args.split)
-    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=2, collate_fn=cfn)
+    loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=2, collate_fn=collate_fn, pin_memory=True)
 
     print(f"evaluating {args.split} split ({len(ds)} frames) from {args.checkpoint} (epoch {ckpt.get('epoch')})")
     metrics = evaluate(model, loader, device, args.score_threshold)

@@ -93,47 +93,43 @@ def voxelize_points(points: torch.Tensor, pc_range: torch.Tensor, voxel_size: to
     return coords
 
 
-def collate_fn(batch, pc_range, voxel_size, grid_size):
-    """Builds a sparse batch: concatenated points + per-point (batch,voxel) bookkeeping.
+def voxelize_batch(points, point_batch_idx, pc_range, voxel_size, grid_size):
+    """The part of batch prep that benefits from running on GPU: per-point coord
+    computation + torch.unique. Call this *after* moving points/point_batch_idx
+    to the training device -- keeping it out of collate_fn is what lets a CPU
+    DataLoader worker just concatenate tensors (cheap) instead of doing this
+    unique() on CPU, which was the actual bottleneck (measured: GPU sat at ~33%
+    util / dataloading-bound, not compute-bound)."""
+    voxel_coords_xyz = voxelize_points(points, pc_range, voxel_size, grid_size)
+    voxel_key = torch.cat([point_batch_idx.unsqueeze(1), voxel_coords_xyz], dim=1)
+    uniq_voxel_coords, point_voxel_idx = torch.unique(voxel_key, dim=0, return_inverse=True)
+    return uniq_voxel_coords, point_voxel_idx
 
-    torch_scatter-based aggregation (cluster/center offsets, PFN pooling) happens
-    in the VFE module on whatever device the batch is moved to -- this function
-    only does index bookkeeping so it stays cheap on CPU dataloader workers.
-    """
-    pc_range_t = torch.as_tensor(pc_range, dtype=torch.float32)
-    voxel_size_t = torch.as_tensor(voxel_size, dtype=torch.float32)
-    grid_size_t = torch.as_tensor(grid_size, dtype=torch.long)
 
+def collate_fn(batch):
+    """Cheap, CPU-side: just concatenate points/gt_boxes/frame_ids and tag each
+    point with which sample it came from. No coordinate math, no torch.unique --
+    see voxelize_batch() for the GPU-side part of batch prep."""
     all_points = []
     all_batch_idx = []
-    all_voxel_coords_xyz = []
     gt_boxes_list = []
     frame_ids = []
 
     for b, sample in enumerate(batch):
         pts = sample["points"]
         if pts.shape[0] > 0:
-            vcoords = voxelize_points(pts, pc_range_t, voxel_size_t, grid_size_t)
             all_points.append(pts)
             all_batch_idx.append(torch.full((pts.shape[0],), b, dtype=torch.long))
-            all_voxel_coords_xyz.append(vcoords)
         gt_boxes_list.append(sample["gt_boxes"])
         frame_ids.append(sample["frame_id"])
 
     points = torch.cat(all_points, dim=0) if all_points else torch.zeros((0, 4))
     point_batch_idx = torch.cat(all_batch_idx, dim=0) if all_batch_idx else torch.zeros((0,), dtype=torch.long)
-    voxel_coords_xyz = torch.cat(all_voxel_coords_xyz, dim=0) if all_voxel_coords_xyz else torch.zeros((0, 3), dtype=torch.long)
-
-    # unique (batch, x, y, z) -> voxel id per point
-    voxel_key = torch.cat([point_batch_idx.unsqueeze(1), voxel_coords_xyz], dim=1)
-    uniq_voxel_coords, point_voxel_idx = torch.unique(voxel_key, dim=0, return_inverse=True)
 
     return {
-        "points": points,                         # (Ntot, 4)
-        "point_batch_idx": point_batch_idx,        # (Ntot,)
-        "point_voxel_idx": point_voxel_idx,        # (Ntot,) -> index into uniq_voxel_coords
-        "voxel_coords": uniq_voxel_coords,         # (Nvox, 4) [batch, x_idx, y_idx, z_idx]
-        "gt_boxes": gt_boxes_list,                 # list[B] of (Nobj_b, 10)
+        "points": points,                    # (Ntot, 4)
+        "point_batch_idx": point_batch_idx,  # (Ntot,)
+        "gt_boxes": gt_boxes_list,            # list[B] of (Nobj_b, 10)
         "frame_ids": frame_ids,
         "batch_size": len(batch),
     }

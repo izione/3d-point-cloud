@@ -24,7 +24,11 @@ def build_dataloader(cfg, split, batch_size, shuffle, num_workers):
     )
 
 
-def save_checkpoint(path, model, optimizer, scheduler, epoch, step, cfg):
+def save_checkpoint(path, model, optimizer, scheduler, epoch, step, cfg, epoch_complete):
+    """epoch_complete=True only when saved *after* finishing all of `epoch`'s
+    batches (the epoch-boundary checkpoints). Step-checkpoints save mid-epoch,
+    so resuming from one must re-run that whole epoch rather than skip to the
+    next -- there's no record of exactly which batches were already seen."""
     path.parent.mkdir(parents=True, exist_ok=True)
     torch.save({
         "model": model.state_dict(),
@@ -32,6 +36,7 @@ def save_checkpoint(path, model, optimizer, scheduler, epoch, step, cfg):
         "scheduler": scheduler.state_dict(),
         "epoch": epoch,
         "step": step,
+        "epoch_complete": epoch_complete,
         "cfg": cfg,
     }, path)
 
@@ -75,8 +80,15 @@ def main():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=opt_cfg["LR"], weight_decay=opt_cfg["WEIGHT_DECAY"])
     steps_per_epoch = len(train_loader)
+    # +15% slack: a mid-epoch resume re-runs that epoch's steps, so the true
+    # step count can exceed steps_per_epoch*num_epochs. OneCycleLR raises a
+    # hard error if .step() is called past total_steps, so this buffer is
+    # what keeps a resumed run from crashing near the end of training. With
+    # zero resumes the schedule just never quite reaches its planned minimum
+    # LR -- a minor imperfection, safer than the alternative.
+    total_steps = int(steps_per_epoch * num_epochs * 1.15)
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=opt_cfg["LR"], total_steps=steps_per_epoch * num_epochs,
+        optimizer, max_lr=opt_cfg["LR"], total_steps=total_steps,
         pct_start=opt_cfg["PCT_START"], div_factor=opt_cfg["DIV_FACTOR"],
         base_momentum=opt_cfg["MOMS"][1], max_momentum=opt_cfg["MOMS"][0],
     )
@@ -87,9 +99,10 @@ def main():
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
         scheduler.load_state_dict(ckpt["scheduler"])
-        start_epoch = ckpt["epoch"] + 1
+        start_epoch = ckpt["epoch"] + 1 if ckpt.get("epoch_complete") else ckpt["epoch"]
         global_step = ckpt["step"]
-        print(f"resumed from {args.resume} at epoch {start_epoch}, step {global_step}")
+        print(f"resumed from {args.resume} at epoch {start_epoch}, step {global_step} "
+              f"(epoch_complete={ckpt.get('epoch_complete')})")
 
     ckpt_dir = Path(args.ckpt_dir)
     ckpt_every_epochs = opt_cfg["CKPT_EVERY_N_EPOCHS"]
@@ -118,7 +131,7 @@ def main():
             })
 
             if ckpt_every_steps and global_step % ckpt_every_steps == 0:
-                save_checkpoint(ckpt_dir / f"step_{global_step}.pth", model, optimizer, scheduler, epoch, global_step, cfg)
+                save_checkpoint(ckpt_dir / f"step_{global_step}.pth", model, optimizer, scheduler, epoch, global_step, cfg, epoch_complete=False)
 
         epoch_time = time.time() - epoch_t0
         avg_train_loss = running_loss / max(len(train_loader), 1)
@@ -126,9 +139,9 @@ def main():
         print(f"epoch {epoch}: train_loss={avg_train_loss:.4f} val_loss={val_loss:.4f} time={epoch_time:.1f}s")
 
         if ckpt_every_epochs and (epoch + 1) % ckpt_every_epochs == 0:
-            save_checkpoint(ckpt_dir / f"epoch_{epoch}.pth", model, optimizer, scheduler, epoch, global_step, cfg)
+            save_checkpoint(ckpt_dir / f"epoch_{epoch}.pth", model, optimizer, scheduler, epoch, global_step, cfg, epoch_complete=True)
 
-    save_checkpoint(ckpt_dir / "last.pth", model, optimizer, scheduler, num_epochs - 1, global_step, cfg)
+    save_checkpoint(ckpt_dir / "last.pth", model, optimizer, scheduler, num_epochs - 1, global_step, cfg, epoch_complete=True)
     print("training complete.")
 
 

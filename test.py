@@ -50,6 +50,109 @@ def greedy_iou_matches(ious, scores, threshold):
     return n_matched
 
 
+@torch.no_grad()
+def collect_pr_data(model, loader, device):
+    """Runs the whole split once with score_threshold=0 (every local-max peak kept,
+    not just the ones above some cutoff) and precomputes each frame's full det x gt
+    axis-aligned IoU matrix. This is the raw material a real PR curve needs: ranking
+    ALL candidates by score and sweeping the confidence cutoff, instead of fixing one
+    cutoff upfront the way evaluate()'s IoU sweep does. Returns (frame_data, total_gt)
+    where frame_data is a list[{"scores": (Nd,), "ious": (Nd,Ng)}]."""
+    model.eval()
+    frame_data = []
+    total_gt = 0
+
+    for batch in loader:
+        pred, stem_coords, gt_boxes_list = model.forward(batch, device)
+        stem_grid_size = tuple(int(stem_coords[:, i].max().item()) + 1 if stem_coords.shape[0] > 0 else 1 for i in (1, 2, 3))
+        index_grid = build_index_grid(stem_coords, batch["batch_size"], stem_grid_size, device=device)
+        eff_voxel_size = model.voxel_size * model.stem_stride
+
+        dets = decode_detections(pred, stem_coords, index_grid, stem_grid_size, model.pc_range, eff_voxel_size, 0.0)
+
+        for b, gt_boxes in enumerate(gt_boxes_list):
+            gt_boxes = gt_boxes.cpu()
+            det = dets[b]
+            total_gt += gt_boxes.shape[0]
+            frame_data.append({"scores": det["score"], "ious": iou_matrix(det, gt_boxes)})
+
+    return frame_data, total_gt
+
+
+def compute_ap(recalls, precisions):
+    """VOC2012-style all-point interpolated average precision: replace precision at
+    each recall with the max precision at any recall >= it (monotonic envelope), then
+    integrate. recalls must be non-decreasing (true for a score-descending PR curve)."""
+    mrec = [0.0] + list(recalls) + [1.0]
+    mpre = [1.0] + list(precisions) + [0.0]
+    for i in range(len(mpre) - 2, -1, -1):
+        mpre[i] = max(mpre[i], mpre[i + 1])
+    ap = 0.0
+    for i in range(1, len(mrec)):
+        ap += (mrec[i] - mrec[i - 1]) * mpre[i]
+    return ap
+
+
+def pr_curve_for_threshold(frame_data, total_gt, iou_threshold):
+    """Pools every detection across the whole split into one score-ranked list (the
+    standard VOC/COCO AP procedure) and walks it high-score-first, greedily claiming
+    each detection's best still-free GT *within its own frame* if that pair's IoU
+    clears iou_threshold. Returns (recalls, precisions, ap)."""
+    pool = []  # (score, frame_index, det_index)
+    for fi, fd in enumerate(frame_data):
+        for di, s in enumerate(fd["scores"].tolist()):
+            pool.append((s, fi, di))
+    pool.sort(key=lambda x: x[0], reverse=True)
+
+    gt_taken = [torch.zeros(fd["ious"].shape[1], dtype=torch.bool) for fd in frame_data]
+    recalls, precisions = [], []
+    tp, fp = 0, 0
+    for _, fi, di in pool:
+        ious = frame_data[fi]["ious"][di]
+        taken = gt_taken[fi]
+        row = ious.clone()
+        row[taken] = -1.0
+        if row.numel() > 0:
+            best_gi = torch.argmax(row).item()
+            if row[best_gi].item() >= iou_threshold:
+                taken[best_gi] = True
+                tp += 1
+            else:
+                fp += 1
+        else:
+            fp += 1
+        recalls.append(tp / total_gt if total_gt else 0.0)
+        precisions.append(tp / (tp + fp))
+
+    ap = compute_ap(recalls, precisions) if recalls else 0.0
+    return recalls, precisions, ap
+
+
+def plot_pr_curves(frame_data, total_gt, out_path):
+    """One line per IoU threshold (blue, light->dark with threshold), recall on x,
+    precision on y, AP in the legend."""
+    import matplotlib.pyplot as plt
+
+    ramp = ["#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#0d366b"]
+    fig, ax = plt.subplots(figsize=(7, 6.2), facecolor="#f5f8f9")
+    ax.set_facecolor("#ffffff")
+    for t, color in zip(IOU_THRESHOLDS, ramp):
+        recalls, precisions, ap = pr_curve_for_threshold(frame_data, total_gt, t)
+        ax.plot(recalls, precisions, color=color, linewidth=2, label=f"IoU {t:.1f}  (AP {ap:.2f})")
+    ax.set_xlim(0, 1)
+    ax.set_ylim(0, 1)
+    ax.set_xlabel("Recall")
+    ax.set_ylabel("Precision")
+    ax.set_title("Precision-recall curve by IoU threshold")
+    ax.grid(color="#dde5e7", linewidth=1)
+    for spine_name, spine in ax.spines.items():
+        spine.set_visible(spine_name in ("left", "bottom"))
+        spine.set_color("#c4ced0")
+    ax.legend(fontsize=9, loc="upper right", bbox_to_anchor=(1.32, 1.02))
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=180, facecolor="#f5f8f9", bbox_inches="tight")
+
+
 def _new_accumulator():
     return {
         "n_gt": 0, "n_det": 0, "n_matched": 0,
@@ -201,6 +304,9 @@ def main():
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--per_frame_out", default=None,
                          help="if set, writes a JSON array of per-frame scores (sorted worst-to-best by F1) to this path")
+    parser.add_argument("--pr_curve_out", default=None,
+                         help="if set, writes a PR-curve-per-IoU-threshold PNG to this path (score-ranked over ALL "
+                              "detections, not just the ones above --score_threshold -- a separate full pass)")
     parser.add_argument("--attention_kind", choices=["softmax", "linear"], default=None,
                          help="override models.slotformer.ATTENTION_KIND (default: whatever the checkpoint was trained with)")
     args = parser.parse_args()
@@ -246,6 +352,12 @@ def main():
         with open(args.per_frame_out, "w") as f:
             json.dump(payload, f, indent=2)
         print(f"\nwrote {len(per_frame)} per-frame records to {args.per_frame_out}")
+
+    if args.pr_curve_out:
+        print("\ncollecting all detections (score_threshold=0) for the PR curve -- a separate full pass...")
+        frame_data, total_gt = collect_pr_data(model, loader, device)
+        plot_pr_curves(frame_data, total_gt, args.pr_curve_out)
+        print(f"wrote PR curve to {args.pr_curve_out}")
 
 
 if __name__ == "__main__":

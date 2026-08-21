@@ -12,8 +12,11 @@ from models.decode import decode_detections
 from models.sparse_ops import build_index_grid
 from models.box_utils import box_to_corners, quat_to_rotmat, axis_aligned_iou_3d
 
-# local x/y/z distinguished by line style since color is already used for GT vs pred
+# local x/y/z distinguished by line style since color carries match status (TP/FP/FN)
 AXIS_STYLES = {"x": "-", "y": "--", "z": ":"}
+
+MATCH_DIST_THRESHOLD_M = 1.0  # same center-distance matching rule as test.py's evaluate()
+COLOR_TP, COLOR_FP, COLOR_FN = "purple", "blue", "red"
 
 # Edges of the cuboid, indexed into the fixed corner order from box_utils._SIGNS
 # (every +/- combination of (l/2, w/2, h/2), sx-major/sy/sz-minor).
@@ -60,6 +63,28 @@ def best_ious(center, size, other_center, other_size):
             best = max(best, axis_aligned_iou_3d(center[i], size[i], other_center[j], other_size[j]))
         ious.append(best)
     return ious
+
+
+def match_boxes(gt_center, pred_center):
+    """Greedy nearest-center 1:1 matching, the same rule test.py's evaluate() uses
+    for its headline recall/precision. Returns {gt_index: pred_index} for pairs
+    within MATCH_DIST_THRESHOLD_M."""
+    matches = {}
+    used_det = set()
+    for oi in range(gt_center.shape[0]):
+        if pred_center.shape[0] == 0:
+            continue
+        dists = (pred_center - gt_center[oi][None, :]).norm(dim=-1)
+        order = torch.argsort(dists)
+        for di in order.tolist():
+            if di in used_det:
+                continue
+            if dists[di].item() > MATCH_DIST_THRESHOLD_M:
+                break
+            used_det.add(di)
+            matches[oi] = di
+            break
+    return matches
 
 
 def annotate_iou(ax, center, size, iou, color, lift=0.15):
@@ -122,17 +147,49 @@ def main():
     if points.shape[0] > 0:
         ax.scatter(points[:, 0], points[:, 1], points[:, 2], s=2, c="gray", alpha=0.3, label="points")
 
+    matches = match_boxes(gt_boxes[:, :3], det["center"])
+    matched_gt, matched_det = set(matches.keys()), set(matches.values())
+    # FN/FP labels still show best-IoU-against-the-other-set (0.00 confirms a clean miss,
+    # nonzero shows a near-miss that didn't clear the center-distance match threshold)
     gt_ious = best_ious(gt_boxes[:, :3], gt_boxes[:, 3:6], det["center"], det["size"])
     pred_ious = best_ious(det["center"], det["size"], gt_boxes[:, :3], gt_boxes[:, 3:6])
 
+    labeled = {"tp": False, "fn": False, "fp": False}
+
+    def take_label(key, text):
+        if labeled[key]:
+            return None
+        labeled[key] = True
+        return text
+
     for i in range(gt_corners.shape[0]):
-        plot_box(ax, gt_corners[i], "red", label="GT" if i == 0 else None)
-        plot_axes(ax, gt_boxes[i, :3], gt_boxes[i, 3:6], gt_boxes[i, 6:10], "red")
-        annotate_iou(ax, gt_boxes[i, :3], gt_boxes[i, 3:6], gt_ious[i], "red", lift=0.15)
+        if i in matched_gt:
+            plot_box(ax, gt_corners[i], COLOR_TP, label=take_label("tp", "matched (TP)"))
+            plot_axes(ax, gt_boxes[i, :3], gt_boxes[i, 3:6], gt_boxes[i, 6:10], COLOR_TP)
+        else:
+            plot_box(ax, gt_corners[i], COLOR_FN, label=take_label("fn", "missed GT (FN)"))
+            plot_axes(ax, gt_boxes[i, :3], gt_boxes[i, 3:6], gt_boxes[i, 6:10], COLOR_FN)
+            annotate_iou(ax, gt_boxes[i, :3], gt_boxes[i, 3:6], gt_ious[i], COLOR_FN, lift=0.15)
+
     for i in range(pred_corners.shape[0]):
-        plot_box(ax, pred_corners[i], "blue", label="pred" if i == 0 else None)
-        plot_axes(ax, det["center"][i], det["size"][i], det["quat"][i], "blue")
-        annotate_iou(ax, det["center"][i], det["size"][i], pred_ious[i], "blue", lift=0.40)
+        if i in matched_det:
+            plot_box(ax, pred_corners[i], COLOR_TP, label=take_label("tp", "matched (TP)"))
+            plot_axes(ax, det["center"][i], det["size"][i], det["quat"][i], COLOR_TP)
+        else:
+            plot_box(ax, pred_corners[i], COLOR_FP, label=take_label("fp", "false positive (FP)"))
+            plot_axes(ax, det["center"][i], det["size"][i], det["quat"][i], COLOR_FP)
+            annotate_iou(ax, det["center"][i], det["size"][i], pred_ious[i], COLOR_FP, lift=0.40)
+
+    # matched pairs: one shared IoU label (the actual paired IoU), not two redundant ones,
+    # placed above whichever of the two boxes reaches higher
+    for oi, di in matches.items():
+        iou = axis_aligned_iou_3d(det["center"][di], det["size"][di], gt_boxes[oi, :3], gt_boxes[oi, 3:6])
+        gt_top = (gt_boxes[oi, 2] + gt_boxes[oi, 5] / 2).item()
+        pred_top = (det["center"][di, 2] + det["size"][di, 2] / 2).item()
+        x = (gt_boxes[oi, 0].item() + det["center"][di, 0].item()) / 2
+        y = (gt_boxes[oi, 1].item() + det["center"][di, 1].item()) / 2
+        z = max(gt_top, pred_top) + 0.15
+        ax.text(x, y, z, f"IoU {iou:.2f}", color=COLOR_TP, fontsize=8, ha="center", va="bottom")
 
     # Zoom to the objects: at full scene scale (~16m x ~20m) a diver-sized box
     # (and its axis arrows) is nearly invisible against the whole point cloud.
@@ -149,7 +206,7 @@ def main():
     ax.set_xlabel("x (m)")
     ax.set_ylabel("y (m)")
     ax.set_zlabel("z (m)")
-    ax.set_title(f"{args.split} frame {idx} ({sample['frame_id']}) -- GT (red) vs pred (blue)")
+    ax.set_title(f"{args.split} frame {idx} ({sample['frame_id']}) -- TP purple / FN red / FP blue")
     handles, labels = ax.get_legend_handles_labels()
     axis_legend = [Line2D([0], [0], color="black", linestyle=ls, label=f"local {name}") for name, ls in AXIS_STYLES.items()]
     ax.legend(handles=handles + axis_legend)

@@ -51,3 +51,23 @@ def corner_distance_cost(pred_center, pred_size, pred_quat, gt_center, gt_size, 
     pred_corners = box_to_corners(pred_center, pred_size, pred_quat)
     gt_corners = box_to_corners(gt_center, gt_size, gt_quat)
     return (pred_corners - gt_corners).norm(dim=-1).mean(dim=-1)
+
+
+def axis_aligned_iou_3d(center1, size1, center2, size2) -> float:
+    """Volume-only 3D IoU: both boxes treated as axis-aligned cuboids (rotation
+    ignored), closed-form -- no sampling. center/size: (3,) each.
+
+    Trade-off vs a rotation-aware IoU: two boxes that are actually disjoint but
+    whose axis-aligned extents overlap will get a nonzero IoU here (and a heavily
+    rotated box's true footprint is smaller than its AABB, so overlap is
+    overestimated). Accepted for eval-speed; label assignment during training
+    already ignores IoU too (models/assign.py uses corner-distance, not IoU)."""
+    lo1, hi1 = center1 - size1 / 2, center1 + size1 / 2
+    lo2, hi2 = center2 - size2 / 2, center2 + size2 / 2
+    overlap = (torch.minimum(hi1, hi2) - torch.maximum(lo1, lo2)).clamp(min=0)
+    inter_vol = overlap.prod().item()
+
+    vol1 = size1.prod().item()
+    vol2 = size2.prod().item()
+    union_vol = vol1 + vol2 - inter_vol
+    return inter_vol / union_vol if union_vol > 1e-9 else 0.0

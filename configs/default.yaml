@@ -50,7 +50,7 @@ BACKBONE:
   NUM_HEADS: 4                  # actually read
   NAME: SlotFormer              # [not read by code] descriptive only
   DIRECTIONS: [x, y, z]         # [not read by code] direction cycling is hardcoded in models/slotformer.py
-  ATTENTION: softmax            # [not read by code] toggle is models/slotformer.py's ATTENTION_MODE module var, not this key
+  ATTENTION: softmax            # [not read by code] toggle is models/slotformer.py's ATTENTION_KIND module var ("softmax" or "linear"), not this key
   POS_ENCODING:                 # [not read by code] sinusoidal-sum PE is hardcoded in models/slotformer.py SFLayer
     TYPE: sinusoidal_sum
     TEMPERATURE: 10000           # matches the hardcoded default in SFLayer.__init__, but changing this value here does nothing

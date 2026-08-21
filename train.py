@@ -8,6 +8,7 @@ import yaml
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
+import models.slotformer as slotformer
 from data.dataset import SonarDiverDataset, collate_fn
 from models.detector import DiverDetector
 
@@ -68,6 +69,7 @@ def save_checkpoint(path, model, optimizer, scheduler, epoch, step, cfg, epoch_c
         "step": step,
         "epoch_complete": epoch_complete,
         "cfg": cfg,
+        "attention_kind": slotformer.ATTENTION_KIND,
     }, path)
 
 
@@ -96,7 +98,13 @@ def main():
     parser.add_argument("--resume", default=None, help="path to a checkpoint to resume from")
     parser.add_argument("--epochs", type=int, default=None, help="override OPTIMIZATION.NUM_EPOCHS")
     parser.add_argument("--log_file", default=None, help="defaults to <ckpt_dir>/loss_history.csv")
+    parser.add_argument("--attention_kind", choices=["softmax", "linear"], default=None,
+                         help="override models.slotformer.ATTENTION_KIND (default: whatever's hardcoded there)")
     args = parser.parse_args()
+
+    if args.attention_kind:
+        slotformer.ATTENTION_KIND = args.attention_kind
+    print(f"SlotFormer attention kind: {slotformer.ATTENTION_KIND}")
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
@@ -138,8 +146,10 @@ def main():
         scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch = ckpt["epoch"] + 1 if ckpt.get("epoch_complete") else ckpt["epoch"]
         global_step = ckpt["step"]
+        if not args.attention_kind and ckpt.get("attention_kind"):
+            slotformer.ATTENTION_KIND = ckpt["attention_kind"]  # keep resumed run consistent with how it was trained
         print(f"resumed from {args.resume} at epoch {start_epoch}, step {global_step} "
-              f"(epoch_complete={ckpt.get('epoch_complete')})")
+              f"(epoch_complete={ckpt.get('epoch_complete')}, attention_kind={slotformer.ATTENTION_KIND})")
 
     ckpt_dir = Path(args.ckpt_dir)
     ckpt_every_epochs = opt_cfg["CKPT_EVERY_N_EPOCHS"]

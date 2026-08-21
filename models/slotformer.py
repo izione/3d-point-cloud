@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 # Same tradeoff as models/sparse_ops.py's CONV_MODE: "padded" batches every
 # slot into one attention call (fewer/bigger GPU launches); "loop" attends
@@ -7,6 +8,15 @@ import torch.nn as nn
 # CPU). Time both on the actual Colab GPU before trusting either default.
 ATTENTION_MODE = "loop"  # "padded" or "loop" -- default "loop" because that's the one actually
                           # measured faster so far (on CPU); try "padded" on the real Colab GPU
+
+# This one is a model-quality comparison, not a speed toggle: "softmax" is
+# the standard scaled-dot-product attention we designed around; "linear" is
+# the kernel-feature-map attention (Katharopoulos et al., elu(x)+1) that
+# FSHNet's own SlotFormer actually uses. Same slot grouping either way --
+# only the in-slot attention math changes. Compare val loss/recall between
+# the two before picking one for a long run.
+ATTENTION_KIND = "softmax"  # "softmax" or "linear"
+LINEAR_ATTN_EPS = 1e-6
 
 
 def sinusoidal_pe(coord_vals: torch.Tensor, dim: int, temperature: float) -> torch.Tensor:
@@ -103,10 +113,32 @@ class SFLayer(nn.Module):
                 continue
             idx = order[offsets[s]: offsets[s] + m]
             qs, ks, vs = q[idx].permute(1, 0, 2), k[idx].permute(1, 0, 2), v[idx].permute(1, 0, 2)
-            scores = (qs @ ks.transpose(-1, -2)) / (self.head_dim ** 0.5)
-            weights = torch.softmax(scores, dim=-1)
-            attn_out[idx] = (weights @ vs).permute(1, 0, 2)
+            if ATTENTION_KIND == "softmax":
+                scores = (qs @ ks.transpose(-1, -2)) / (self.head_dim ** 0.5)
+                weights = torch.softmax(scores, dim=-1)
+                out = weights @ vs
+            else:
+                out = self._linear_attend(qs, ks, vs)
+            attn_out[idx] = out.permute(1, 0, 2)
         return attn_out
+
+    def _linear_attend(self, qs, ks, vs, key_mask=None):
+        """Katharopoulos et al. linear attention: replace softmax(QK^T)V with a
+        positive kernel feature map phi(x)=elu(x)+1, so QK^T never gets formed --
+        phi(K)^T @ V is computed once per slot and reused for every query in it.
+        qs/ks/vs: (..., seq, head_dim). key_mask (optional): (..., seq, 1) with
+        1.0 for real positions / 0.0 for padding -- zeroed *after* phi(), since
+        phi(0) = elu(0)+1 = 1, not 0, so un-masked padding would otherwise leak
+        a phantom key/value into the sum."""
+        phi_q = F.elu(qs) + 1
+        phi_k = F.elu(ks) + 1
+        if key_mask is not None:
+            phi_k = phi_k * key_mask
+            vs = vs * key_mask
+        kv = phi_k.transpose(-1, -2) @ vs                            # (..., head_dim, head_dim)
+        k_sum = phi_k.sum(dim=-2, keepdim=True)                      # (..., 1, head_dim)
+        z = 1.0 / (phi_q @ k_sum.transpose(-1, -2) + LINEAR_ATTN_EPS)  # (..., seq, 1)
+        return (phi_q @ kv) * z
 
     def _attend_padded(self, q, k, v, slot_ids, num_slots):
         """Pads every slot to the same size and runs ONE batched attention
@@ -130,12 +162,16 @@ class SFLayer(nn.Module):
         k_pad = k[safe_idx].permute(0, 2, 1, 3)
         v_pad = v[safe_idx].permute(0, 2, 1, 3)
 
-        scores = (q_pad @ k_pad.transpose(-1, -2)) / (self.head_dim ** 0.5)
-        key_mask = pad_mask[:, None, None, :]
-        scores = scores.masked_fill(~key_mask, float("-inf"))
-        weights = torch.softmax(scores, dim=-1)
-        weights = torch.nan_to_num(weights, nan=0.0)
-        out_pad = (weights @ v_pad).permute(0, 2, 1, 3)
+        if ATTENTION_KIND == "softmax":
+            scores = (q_pad @ k_pad.transpose(-1, -2)) / (self.head_dim ** 0.5)
+            key_mask = pad_mask[:, None, None, :]
+            scores = scores.masked_fill(~key_mask, float("-inf"))
+            weights = torch.softmax(scores, dim=-1)
+            weights = torch.nan_to_num(weights, nan=0.0)
+            out_pad = (weights @ v_pad).permute(0, 2, 1, 3)
+        else:
+            key_mask = pad_mask[:, None, :, None].to(q_pad.dtype)  # (S,1,max_m,1), broadcasts over heads/head_dim
+            out_pad = self._linear_attend(q_pad, k_pad, v_pad, key_mask=key_mask).permute(0, 2, 1, 3)
 
         attn_out = torch.zeros_like(v)
         flat_idx = padded_idx.reshape(-1)

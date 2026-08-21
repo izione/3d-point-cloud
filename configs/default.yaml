@@ -85,10 +85,6 @@ LOSS:
     rotation: 1.0                 # double-cover-safe quaternion loss
   FOCAL_ALPHA: 2
   FOCAL_BETA: 4
-  CENTER_SIGMA_M: 0.5            # actually read -- gaussian sigma (meters) for the soft center/corner heatmap
-                                  # target; effective grid spacing at the head is 0.4m (0.2m voxel * stride 2),
-                                  # so 0.5m gives near-neighbor voxels (~2 cells) a meaningfully reduced negative
-                                  # penalty -- shrink this to sharpen the target if the model is centering loosely
 
 OPTIMIZATION:
   LR: 0.003

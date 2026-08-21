@@ -3,6 +3,8 @@ import torch.nn.functional as F
 
 from .box_utils import box_to_corners, quat_geodesic_loss
 
+CENTER_SIGMA_M = 0.5   # Gaussian sigma (meters) for rendered center/corner heatmap targets
+
 
 def focal_heatmap_loss(pred_logit, gt_heatmap, alpha=2, beta=4):
     """Penalty-reduced focal loss (CornerNet/CenterNet). pred_logit, gt_heatmap: (N,).
@@ -69,12 +71,11 @@ def render_gt_corner_map(coords, gt_boxes_list, pc_range, effective_voxel_size, 
 def compute_total_loss(pred, coords, gt_boxes_list, assign_result, loss_cfg, pc_range, effective_voxel_size):
     weights = loss_cfg["WEIGHTS"]
     alpha, beta = loss_cfg["FOCAL_ALPHA"], loss_cfg["FOCAL_BETA"]
-    center_sigma_m = loss_cfg["CENTER_SIGMA_M"]
     pos_mask = assign_result["pos_mask"]
     device = coords.device
 
     gt_centers_per_batch = [g[:, :3] for g in gt_boxes_list]
-    center_heat_target = render_gaussian_targets(coords, gt_centers_per_batch, pc_range, effective_voxel_size, center_sigma_m)
+    center_heat_target = render_gaussian_targets(coords, gt_centers_per_batch, pc_range, effective_voxel_size, CENTER_SIGMA_M)
     center_heat_target = torch.where(pos_mask, torch.ones_like(center_heat_target), center_heat_target)
     center_loss = focal_heatmap_loss(pred["center_logit"].squeeze(-1), center_heat_target, alpha, beta)
 
@@ -94,10 +95,10 @@ def compute_total_loss(pred, coords, gt_boxes_list, assign_result, loss_cfg, pc_
         size_loss = pred["box"][:, :3].sum() * 0.0
         rot_loss = pred["box"][:, 3:7].sum() * 0.0
 
-    gt_corner_heat = render_gt_corner_map(coords, gt_boxes_list, pc_range, effective_voxel_size, center_sigma_m)
+    gt_corner_heat = render_gt_corner_map(coords, gt_boxes_list, pc_range, effective_voxel_size, CENTER_SIGMA_M)
     pred_corner_heat = render_predicted_corner_map(
         coords, pos_mask, assign_result["pred_center"], assign_result["pred_size"], assign_result["pred_quat"],
-        pc_range, effective_voxel_size, center_sigma_m,
+        pc_range, effective_voxel_size, CENTER_SIGMA_M,
     )
     corner_loss = F.mse_loss(pred_corner_heat, gt_corner_heat)
 

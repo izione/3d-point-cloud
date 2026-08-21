@@ -100,9 +100,6 @@ def main():
     parser.add_argument("--log_file", default=None, help="defaults to <ckpt_dir>/loss_history.csv")
     parser.add_argument("--attention_kind", choices=["softmax", "linear"], default=None,
                          help="override models.slotformer.ATTENTION_KIND (default: whatever's hardcoded there)")
-    parser.add_argument("--center_sigma", type=float, default=None,
-                         help="override LOSS.CENTER_SIGMA_M (meters) -- the gaussian sigma for the soft "
-                              "center/corner heatmap target; shrink this to sharpen center localization")
     args = parser.parse_args()
 
     if args.attention_kind:
@@ -111,10 +108,6 @@ def main():
 
     with open(args.config) as f:
         cfg = yaml.safe_load(f)
-
-    if args.center_sigma is not None:
-        cfg["LOSS"]["CENTER_SIGMA_M"] = args.center_sigma
-    print(f"LOSS.CENTER_SIGMA_M: {cfg['LOSS']['CENTER_SIGMA_M']}")
 
     opt_cfg = cfg["OPTIMIZATION"]
     num_epochs = args.epochs or opt_cfg["NUM_EPOCHS"]

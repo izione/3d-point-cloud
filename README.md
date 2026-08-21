@@ -99,29 +99,6 @@ Then compare `checkpoints_softmax/loss_history.csv` vs
 `checkpoints_linear/loss_history.csv` (val rows), and the two `test.py`
 reports (recall/precision/IoU sweep).
 
-### Center heatmap sharpness: `CENTER_SIGMA_M`
-
-`LOSS.CENTER_SIGMA_M` (meters, real-world -- config default 0.5) is the
-gaussian sigma used to render the soft center/corner heatmap target that
-`focal_heatmap_loss` uses to reduce the negative penalty near a true
-center (see `models/losses.py`'s `render_gaussian_targets`). It's
-independent of voxel size, but worth judging relative to the grid the
-heads actually run on: 0.2m voxel * stem stride 2 = 0.4m effective
-spacing, so the 0.5m default gives roughly a 2-cell radius of meaningful
-softening. If the model is centering loosely, shrinking this sharpens the
-target and pushes nearby-but-wrong voxels to look more like true
-negatives. Unlike `ATTENTION_KIND`, this is a real config value (not a
-module toggle), so it's picked up from the yaml automatically -- the CLI
-flag is just there for quick sweeps without editing the file:
-
-```bash
-python train.py --config configs/default.yaml --ckpt_dir checkpoints_sigma05 --center_sigma 0.5  # = the yaml default
-python train.py --config configs/default.yaml --ckpt_dir checkpoints_sigma02 --center_sigma 0.2
-```
-The value actually used gets saved into the checkpoint's `cfg`, so
-`test.py --checkpoint ... ` (no extra flag needed) always evaluates with
-the config the checkpoint itself was trained under.
-
 ## Test / evaluate
 
 ```bash

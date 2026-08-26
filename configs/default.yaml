@@ -10,24 +10,45 @@ DATA:
   ROOT: "../dataset"          # relative to diver_net/ ; change to absolute path or Drive mount on Colab
   VOXEL_SIZE: [0.2, 0.2, 0.2]
   POINT_CLOUD_RANGE: [0.0, -11.4, -5.6, 16.2, 11.4, 5.6]   # xmin,ymin,zmin,xmax,ymax,zmax
-  # scene-level split, Person1+2 only (Person3/4 excluded: inconsistent rotation labels)
-  TEST_SCENES:  ["Person2/scene_0078"]
+  # scene-level 8:1:1 split over all 4 persons (Person3/4 relabeled for quality and
+  # re-included; previously excluded for inconsistent rotation labels). Random
+  # split (seed 42) over all scenes except Person2/scene_0078, which stays in TEST
+  # as it was before this split existed.
+  TEST_SCENES:
+    - "Person2/scene_0078"
+    - "Person3/scene_0067"
+    - "Person3/scene_0019"
   VAL_SCENES:
-    - "Person1/scene_0036"
-    - "Person1/scene_0063"
-    - "Person1/scene_0049"
     - "Person2/scene_0076"
-    - "Person2/scene_0089"
+    - "Person3/scene_0092"
+    - "Person4/scene_0065"
   TRAIN_SCENES:
-    - "Person1/scene_0000"
-    - "Person1/scene_0042"
-    - "Person1/scene_0044"
     - "Person1/scene_0068"
+    - "Person1/scene_0063"
+    - "Person2/scene_0089"
+    - "Person2/scene_0079"
+    - "Person3/scene_0022"
+    - "Person2/scene_0050"
+    - "Person4/scene_0055"
+    - "Person4/scene_0090"
+    - "Person3/scene_0080"
+    - "Person3/scene_0043"
+    - "Person4/scene_0074"
+    - "Person1/scene_0036"
+    - "Person2/scene_0091"
+    - "Person3/scene_0064"
+    - "Person1/scene_0042"
+    - "Person3/scene_0048"
+    - "Person3/scene_0072"
+    - "Person4/scene_0075"
+    - "Person1/scene_0049"
+    - "Person4/scene_0021"
     - "Person2/scene_0009"
     - "Person2/scene_0035"
-    - "Person2/scene_0050"
-    - "Person2/scene_0079"
-    - "Person2/scene_0091"
+    - "Person3/scene_0082"
+    - "Person1/scene_0000"
+    - "Person1/scene_0044"
+    - "Person3/scene_0070"
   AUGMENTATION: false          # [not read by code] no augmentation is implemented at all -- nothing to toggle
 
 VFE:

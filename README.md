@@ -12,8 +12,8 @@ and Colab GPU with zero extra native-extension installs.
 ## Colab setup
 
 ```python
-!git clone <this repo>  # or upload the diver_net/ folder
-%cd diver_net
+!git clone -b slotformer https://github.com/izione/3d-point-cloud.git
+%cd 3d-point-cloud
 !pip install -r requirements.txt
 
 # mount the dataset (adjust to wherever you uploaded dataset/)
@@ -21,6 +21,10 @@ from google.colab import drive
 drive.mount('/content/drive')
 # then edit configs/default.yaml -> DATA.ROOT to point at it
 ```
+
+The model code lives on the `slotformer` branch specifically (this repo also holds
+other model experiments on other branches) -- a plain `git clone` without `-b
+slotformer` checks out `main` instead and won't have these files.
 
 Confirm a GPU runtime is attached: Runtime -> Change runtime type -> T4 GPU (or better).
 

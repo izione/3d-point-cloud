@@ -10,19 +10,21 @@ DATA:
   ROOT: "../dataset"          # relative to diver_net/ ; change to absolute path or Drive mount on Colab
   VOXEL_SIZE: [0.2, 0.2, 0.2]
   POINT_CLOUD_RANGE: [0.0, -11.4, -5.6, 16.2, 11.4, 5.6]   # xmin,ymin,zmin,xmax,ymax,zmax
-  # scene-level 8:1:1 split over all 4 persons (Person3/4 relabeled for quality and
-  # re-included; previously excluded for inconsistent rotation labels). Random
-  # split (seed 42) over all scenes except Person2/scene_0078, which stays in TEST
-  # as it was before this split existed.
+  # TEST is a genuine held-out scene split over all 4 persons (Person3/4 relabeled
+  # for quality and re-included; previously excluded for inconsistent rotation
+  # labels) -- no frame from these 3 scenes ever appears in train/val. Person2/
+  # scene_0078 stays pinned here since it was already TEST before this split
+  # existed; the other two were a seed-42 random pick.
   TEST_SCENES:
     - "Person2/scene_0078"
     - "Person3/scene_0067"
     - "Person3/scene_0019"
-  VAL_SCENES:
-    - "Person2/scene_0076"
-    - "Person3/scene_0092"
-    - "Person4/scene_0065"
-  TRAIN_SCENES:
+  # TRAIN and VAL are instead a frame-level random split of this pool (see
+  # SonarDiverDataset): every one of these 29 scenes contributes frames to BOTH
+  # train and val, so val loss tracks "how well is training going" across the
+  # full pose/scene diversity, rather than generalization to a couple of unseen
+  # scenes (that's what TEST measures).
+  TRAINVAL_SCENES:
     - "Person1/scene_0068"
     - "Person1/scene_0063"
     - "Person2/scene_0089"
@@ -49,6 +51,11 @@ DATA:
     - "Person1/scene_0000"
     - "Person1/scene_0044"
     - "Person3/scene_0070"
+    - "Person2/scene_0076"
+    - "Person3/scene_0092"
+    - "Person4/scene_0065"
+  VAL_FRAME_RATIO: 0.1          # actually read (data/dataset.py) -- fraction of TRAINVAL_SCENES' pooled frames held out for val
+  SPLIT_SEED: 42                # actually read (data/dataset.py) -- shuffle seed for the train/val frame split
   AUGMENTATION: false          # [not read by code] no augmentation is implemented at all -- nothing to toggle
 
 VFE:

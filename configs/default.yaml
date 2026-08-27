@@ -12,15 +12,20 @@ DATA:
   POINT_CLOUD_RANGE: [0.0, -11.4, -5.6, 16.2, 11.4, 5.6]   # xmin,ymin,zmin,xmax,ymax,zmax
   # TEST is a genuine held-out scene split over all 4 persons (Person3/4 relabeled
   # for quality and re-included; previously excluded for inconsistent rotation
-  # labels) -- no frame from these 3 scenes ever appears in train/val. Person2/
+  # labels) -- no frame from these scenes ever appears in train/val. Person2/
   # scene_0078 stays pinned here since it was already TEST before this split
   # existed; the other two were a seed-42 random pick.
+  #
+  # Person2/scene_0050, scene_0079, scene_0091 are excluded entirely (not in
+  # TEST or TRAINVAL) -- they predate the Person3/4-era relabeling pass and
+  # haven't been re-verified yet. Add them back to TRAINVAL_SCENES once
+  # relabeled.
   TEST_SCENES:
     - "Person2/scene_0078"
     - "Person3/scene_0067"
     - "Person3/scene_0019"
   # TRAIN and VAL are instead a frame-level random split of this pool (see
-  # SonarDiverDataset): every one of these 29 scenes contributes frames to BOTH
+  # SonarDiverDataset): every one of these 26 scenes contributes frames to BOTH
   # train and val, so val loss tracks "how well is training going" across the
   # full pose/scene diversity, rather than generalization to a couple of unseen
   # scenes (that's what TEST measures).
@@ -28,16 +33,13 @@ DATA:
     - "Person1/scene_0068"
     - "Person1/scene_0063"
     - "Person2/scene_0089"
-    - "Person2/scene_0079"
     - "Person3/scene_0022"
-    - "Person2/scene_0050"
     - "Person4/scene_0055"
     - "Person4/scene_0090"
     - "Person3/scene_0080"
     - "Person3/scene_0043"
     - "Person4/scene_0074"
     - "Person1/scene_0036"
-    - "Person2/scene_0091"
     - "Person3/scene_0064"
     - "Person1/scene_0042"
     - "Person3/scene_0048"

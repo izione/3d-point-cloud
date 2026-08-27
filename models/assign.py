@@ -1,15 +1,19 @@
 import torch
 
-from .box_utils import corner_distance_cost
+from .box_utils import corner_distance_cost, points_in_oriented_box
 
 TOPQ = 10  # SimOTA-style: dynamic-k comes from the sum of the top-`TOPQ` quality scores
 
 
 class DynamicLabelAssigner:
-    """FSHNet DCLA-style assignment, extended to the *entire* active-voxel set
-    (not a fixed top-5 spatial candidate pool -- see design discussion) and
-    using a corner-distance regression cost instead of RWIoU, since RWIoU
-    assumes yaw-only rotation and our boxes carry a full quaternion.
+    """FSHNet DCLA-style assignment, SimOTA-shaped: the candidate pool per GT
+    is voxels whose center falls inside that GT's own (oriented) box -- using
+    only the GT's own center/size/quaternion to define the region, same as
+    SimOTA's "candidates inside the GT box" filter -- with a nearest-voxel
+    fallback if the box is smaller than a voxel (so MIN_POSITIVES stays
+    satisfiable). The cost/quality metric is still corner-distance instead of
+    IoU, since RWIoU assumes yaw-only rotation and our boxes carry a full
+    quaternion.
 
     cost = cls_weight * (1 - cls_score) + reg_weight * corner_distance
     "quality" for the dynamic-k estimate is exp(-corner_distance), a bounded
@@ -58,16 +62,29 @@ class DynamicLabelAssigner:
 
             for oi in range(gt_boxes.shape[0]):
                 gt = gt_boxes[oi]
-                m = batch_idx.shape[0]
+
+                # SimOTA-style spatial filter: candidates are voxels whose
+                # center actually lies inside this GT's own oriented box --
+                # nothing but the GT's own center/size/quat decides this.
+                in_box = points_in_oriented_box(voxel_centers[batch_idx], gt[:3], gt[3:6], gt[6:10])
+                cand_idx = batch_idx[in_box]
+                if cand_idx.numel() == 0:
+                    # box smaller than a voxel, or straddling voxel centers --
+                    # fall back to the single nearest voxel so MIN_POSITIVES
+                    # is still satisfiable instead of this GT getting nothing.
+                    dists = (voxel_centers[batch_idx] - gt[:3].unsqueeze(0)).norm(dim=-1)
+                    cand_idx = batch_idx[dists.argmin().unsqueeze(0)]
+
+                m = cand_idx.shape[0]
                 gt_center = gt[:3].unsqueeze(0).expand(m, 3)
                 gt_size = gt[3:6].unsqueeze(0).expand(m, 3)
                 gt_quat = gt[6:10].unsqueeze(0).expand(m, 4)
 
                 reg_cost = corner_distance_cost(
-                    pred_center[batch_idx], pred_size[batch_idx], pred_quat[batch_idx],
+                    pred_center[cand_idx], pred_size[cand_idx], pred_quat[cand_idx],
                     gt_center, gt_size, gt_quat,
                 )
-                cls_cost = 1.0 - cls_score[batch_idx]
+                cls_cost = 1.0 - cls_score[cand_idx]
                 cost = self.cls_weight * cls_cost + self.reg_weight * reg_cost
 
                 quality = torch.exp(-reg_cost)
@@ -77,7 +94,7 @@ class DynamicLabelAssigner:
                 dynamic_k = min(dynamic_k, cost.shape[0])
 
                 topk_costs, topk_local = torch.topk(cost, dynamic_k, largest=False)
-                sel = batch_idx[topk_local]
+                sel = cand_idx[topk_local]
 
                 # only claim voxels this object beats the current owner on --
                 # a voxel already better-explained by another nearby object

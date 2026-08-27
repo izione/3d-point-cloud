@@ -106,7 +106,7 @@ ASSIGNER:
   REG_WEIGHT: 3.0                # actually read
   MIN_POSITIVES: 1               # actually read
   NAME: DynamicCornerAssign      # [not read by code] descriptive only
-  CANDIDATE_POOL: all_active     # [not read by code] always the full active-voxel set in models/assign.py (NOT top-5 like FSHNet)
+  CANDIDATE_POOL: in_gt_box      # [not read by code] voxels inside each GT's own oriented box in models/assign.py (SimOTA-style; nearest-voxel fallback if the box is smaller than a voxel), NOT top-5 like FSHNet or the whole active set
   REG_COST: corner_distance      # [not read by code] always corner-distance in models/assign.py (RWIoU is quaternion-incompatible)
 
 LOSS:

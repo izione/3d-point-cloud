@@ -76,7 +76,10 @@ STEM:
 BACKBONE:
   FEATURE_DIM: 128              # actually read
   WIN_SIZE: 12                  # actually read -- in stem-output voxels (=4.8m at stem-output resolution)
-  NUM_CYCLES: 2                 # actually read -- x,y,z repeated twice = 6 SFLayers total
+  NUM_CYCLES: 1                 # actually read -- x,y,z once = 3 SFLayers total; one full x->y->z pass
+                                 # already gives every voxel a global 3D receptive field, so this trades
+                                 # away representational depth (not receptive field) to fight overfitting.
+                                 # was 2 (6 layers) -- bump back up if train loss stops dropping enough.
   NUM_HEADS: 4                  # actually read
   NAME: SlotFormer              # [not read by code] descriptive only
   DIRECTIONS: [x, y, z]         # [not read by code] direction cycling is hardcoded in models/slotformer.py

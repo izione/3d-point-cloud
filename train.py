@@ -132,24 +132,36 @@ def main():
     # zero resumes the schedule just never quite reaches its planned minimum
     # LR -- a minor imperfection, safer than the alternative.
     total_steps = int(steps_per_epoch * num_epochs * 1.15)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimizer, max_lr=opt_cfg["LR"], total_steps=total_steps,
-        pct_start=opt_cfg["PCT_START"], div_factor=opt_cfg["DIV_FACTOR"],
-        base_momentum=opt_cfg["MOMS"][1], max_momentum=opt_cfg["MOMS"][0],
-    )
 
     start_epoch, global_step = 0, 0
+    ckpt = None
     if args.resume:
         ckpt = torch.load(args.resume, map_location=device)
         model.load_state_dict(ckpt["model"])
         optimizer.load_state_dict(ckpt["optimizer"])
-        scheduler.load_state_dict(ckpt["scheduler"])
         start_epoch = ckpt["epoch"] + 1 if ckpt.get("epoch_complete") else ckpt["epoch"]
         global_step = ckpt["step"]
         if not args.attention_kind and ckpt.get("attention_kind"):
             slotformer.ATTENTION_KIND = ckpt["attention_kind"]  # keep resumed run consistent with how it was trained
         print(f"resumed from {args.resume} at epoch {start_epoch}, step {global_step} "
               f"(epoch_complete={ckpt.get('epoch_complete')}, attention_kind={slotformer.ATTENTION_KIND})")
+
+    # Built AFTER knowing global_step, and sized off *this* run's steps_per_epoch
+    # (not loaded from the checkpoint's scheduler state) -- deliberately, so that
+    # resuming after the dataset/config changed (different steps_per_epoch, e.g.
+    # scenes added or the split changed) can't inherit a stale, now-too-small
+    # total_steps and crash once global_step runs past it. Passing last_epoch
+    # instead of scheduler.load_state_dict() puts the scheduler's counter at the
+    # right position while its total_steps/phase boundaries reflect the current
+    # run. This does mean the LR curve reshapes around the new total_steps on
+    # resume rather than continuing the exact old curve -- an unavoidable
+    # consequence of the schedule length actually changing, not a bug.
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=opt_cfg["LR"], total_steps=total_steps,
+        pct_start=opt_cfg["PCT_START"], div_factor=opt_cfg["DIV_FACTOR"],
+        base_momentum=opt_cfg["MOMS"][1], max_momentum=opt_cfg["MOMS"][0],
+        last_epoch=(global_step - 1) if ckpt is not None else -1,
+    )
 
     ckpt_dir = Path(args.ckpt_dir)
     ckpt_every_epochs = opt_cfg["CKPT_EVERY_N_EPOCHS"]

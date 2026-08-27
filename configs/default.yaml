@@ -120,7 +120,9 @@ LOSS:
   FOCAL_BETA: 4
 
 OPTIMIZATION:
-  LR: 0.003
+  LR: 0.048                     # linear-scaled with BATCH_SIZE 4->64 (0.003 * 16). This is the OneCycleLR
+                                 # peak (DIV_FACTOR/PCT_START below still control warmup) -- if loss spikes
+                                 # or diverges early, try sqrt scaling instead (~0.012) and back off from there.
   WEIGHT_DECAY: 0.01
   MOMS: [0.95, 0.85]
   PCT_START: 0.1

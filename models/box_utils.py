@@ -53,6 +53,16 @@ def corner_distance_cost(pred_center, pred_size, pred_quat, gt_center, gt_size, 
     return (pred_corners - gt_corners).norm(dim=-1).mean(dim=-1)
 
 
+def points_in_oriented_box(points: torch.Tensor, center: torch.Tensor, size: torch.Tensor, quat: torch.Tensor) -> torch.Tensor:
+    """points: (M,3) world points. center/size/quat: (3,)/(3,)/(4,) for ONE box.
+    Returns (M,) bool -- which points fall inside that oriented box (used as
+    the SimOTA-style spatial candidate filter in models/assign.py)."""
+    R = quat_to_rotmat(quat.unsqueeze(0))[0]     # (3,3), local -> world
+    local = (points - center[None, :]) @ R       # world -> local: R^T @ diff, done as diff @ R
+    half = size / 2
+    return (local.abs() <= half[None, :]).all(dim=-1)
+
+
 def axis_aligned_iou_3d(center1, size1, center2, size2) -> float:
     """Volume-only 3D IoU: both boxes treated as axis-aligned cuboids (rotation
     ignored), closed-form -- no sampling. center/size: (3,) each.

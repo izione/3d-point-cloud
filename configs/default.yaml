@@ -12,15 +12,20 @@ DATA:
   POINT_CLOUD_RANGE: [0.0, -11.4, -5.6, 16.2, 11.4, 5.6]   # xmin,ymin,zmin,xmax,ymax,zmax
   # TEST is a genuine held-out scene split over all 4 persons (Person3/4 relabeled
   # for quality and re-included; previously excluded for inconsistent rotation
-  # labels) -- no frame from these 3 scenes ever appears in train/val. Person2/
+  # labels) -- no frame from these scenes ever appears in train/val. Person2/
   # scene_0078 stays pinned here since it was already TEST before this split
   # existed; the other two were a seed-42 random pick.
+  #
+  # Person2/scene_0050, scene_0079, scene_0091 are excluded entirely (not in
+  # TEST or TRAINVAL) -- they predate the Person3/4-era relabeling pass and
+  # haven't been re-verified yet. Add them back to TRAINVAL_SCENES once
+  # relabeled.
   TEST_SCENES:
     - "Person2/scene_0078"
     - "Person3/scene_0067"
     - "Person3/scene_0019"
   # TRAIN and VAL are instead a frame-level random split of this pool (see
-  # SonarDiverDataset): every one of these 29 scenes contributes frames to BOTH
+  # SonarDiverDataset): every one of these 26 scenes contributes frames to BOTH
   # train and val, so val loss tracks "how well is training going" across the
   # full pose/scene diversity, rather than generalization to a couple of unseen
   # scenes (that's what TEST measures).
@@ -28,16 +33,13 @@ DATA:
     - "Person1/scene_0068"
     - "Person1/scene_0063"
     - "Person2/scene_0089"
-    - "Person2/scene_0079"
     - "Person3/scene_0022"
-    - "Person2/scene_0050"
     - "Person4/scene_0055"
     - "Person4/scene_0090"
     - "Person3/scene_0080"
     - "Person3/scene_0043"
     - "Person4/scene_0074"
     - "Person1/scene_0036"
-    - "Person2/scene_0091"
     - "Person3/scene_0064"
     - "Person1/scene_0042"
     - "Person3/scene_0048"
@@ -74,7 +76,10 @@ STEM:
 BACKBONE:
   FEATURE_DIM: 128              # actually read
   WIN_SIZE: 12                  # actually read -- in stem-output voxels (=4.8m at stem-output resolution)
-  NUM_CYCLES: 2                 # actually read -- x,y,z repeated twice = 6 SFLayers total
+  NUM_CYCLES: 1                 # actually read -- x,y,z once = 3 SFLayers total; one full x->y->z pass
+                                 # already gives every voxel a global 3D receptive field, so this trades
+                                 # away representational depth (not receptive field) to fight overfitting.
+                                 # was 2 (6 layers) -- bump back up if train loss stops dropping enough.
   NUM_HEADS: 4                  # actually read
   NAME: SlotFormer              # [not read by code] descriptive only
   DIRECTIONS: [x, y, z]         # [not read by code] direction cycling is hardcoded in models/slotformer.py
@@ -101,7 +106,7 @@ ASSIGNER:
   REG_WEIGHT: 3.0                # actually read
   MIN_POSITIVES: 1               # actually read
   NAME: DynamicCornerAssign      # [not read by code] descriptive only
-  CANDIDATE_POOL: all_active     # [not read by code] always the full active-voxel set in models/assign.py (NOT top-5 like FSHNet)
+  CANDIDATE_POOL: in_gt_box      # [not read by code] voxels inside each GT's own oriented box in models/assign.py (SimOTA-style; nearest-voxel fallback if the box is smaller than a voxel), NOT top-5 like FSHNet or the whole active set
   REG_COST: corner_distance      # [not read by code] always corner-distance in models/assign.py (RWIoU is quaternion-incompatible)
 
 LOSS:
@@ -115,13 +120,15 @@ LOSS:
   FOCAL_BETA: 4
 
 OPTIMIZATION:
-  LR: 0.003
+  LR: 0.048                     # linear-scaled with BATCH_SIZE 4->64 (0.003 * 16). This is the OneCycleLR
+                                 # peak (DIV_FACTOR/PCT_START below still control warmup) -- if loss spikes
+                                 # or diverges early, try sqrt scaling instead (~0.012) and back off from there.
   WEIGHT_DECAY: 0.01
   MOMS: [0.95, 0.85]
   PCT_START: 0.1
   DIV_FACTOR: 100
   GRAD_NORM_CLIP: 10
-  BATCH_SIZE: 4
+  BATCH_SIZE: 64
   NUM_EPOCHS: 20
   CKPT_EVERY_N_EPOCHS: 1
   CKPT_EVERY_N_STEPS: 500        # extra safety checkpoint mid-epoch

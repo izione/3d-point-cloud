@@ -1,0 +1,569 @@
+<title>DiverNet Eval Results</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    color-scheme: light;
+    --page:          #f5f8f9;
+    --surface:       #ffffff;
+    --surface-2:     #eef3f4;
+    --ink:           #0c1417;
+    --ink-secondary: #4c5a5f;
+    --ink-muted:     #838f93;
+    --hairline:      #dde5e7;
+    --hairline-strong: #c4ced0;
+    --accent:        #12626d;
+    --accent-soft:   #e2eff1;
+
+    --series-overall: #2a78d6;
+    --series-person1: #eb6834;
+    --series-person2: #1baf7a;
+
+    --good: #0ca30c;
+    --bad:  #d03b3b;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --page:          #0a0e10;
+      --surface:       #12181a;
+      --surface-2:     #1a2224;
+      --ink:           #f2f6f7;
+      --ink-secondary: #b7c2c5;
+      --ink-muted:     #7c8a8e;
+      --hairline:      #253032;
+      --hairline-strong: #33403f;
+      --accent:        #52c2cc;
+      --accent-soft:   #163136;
+
+      --series-overall: #3987e5;
+      --series-person1: #d95926;
+      --series-person2: #199e70;
+
+      --good: #0ca30c;
+      --bad:  #e66767;
+    }
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+    --page:          #0a0e10;
+    --surface:       #12181a;
+    --surface-2:     #1a2224;
+    --ink:           #f2f6f7;
+    --ink-secondary: #b7c2c5;
+    --ink-muted:     #7c8a8e;
+    --hairline:      #253032;
+    --hairline-strong: #33403f;
+    --accent:        #52c2cc;
+    --accent-soft:   #163136;
+
+    --series-overall: #3987e5;
+    --series-person1: #d95926;
+    --series-person2: #199e70;
+
+    --good: #0ca30c;
+    --bad:  #e66767;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--page);
+    color: var(--ink);
+    font-family: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 900px;
+    margin: 0 auto;
+    padding: 56px 24px 96px;
+    display: flex;
+    flex-direction: column;
+    gap: 44px;
+  }
+
+  /* ---------- header ---------- */
+  header {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-bottom: 28px;
+    border-bottom: 1px solid var(--hairline-strong);
+  }
+  .eyebrow {
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 500;
+  }
+  h1 {
+    margin: 0;
+    font-size: 32px;
+    font-weight: 700;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+  .subhead {
+    margin: 0;
+    color: var(--ink-secondary);
+    font-size: 15px;
+    max-width: 62ch;
+    line-height: 1.55;
+  }
+  .runmeta {
+    margin-top: 4px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 22px;
+    font-family: "IBM Plex Mono", monospace;
+    font-size: 12.5px;
+    color: var(--ink-muted);
+  }
+  .runmeta b { color: var(--ink-secondary); font-weight: 500; }
+
+  /* ---------- sections ---------- */
+  section { display: flex; flex-direction: column; gap: 16px; }
+  h2 {
+    margin: 0;
+    font-size: 19px;
+    font-weight: 600;
+    letter-spacing: -0.005em;
+  }
+  .section-note {
+    margin: -6px 0 0;
+    font-size: 13.5px;
+    color: var(--ink-muted);
+    line-height: 1.5;
+    max-width: 68ch;
+  }
+
+  /* ---------- tables ---------- */
+  .table-scroll { overflow-x: auto; }
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 560px;
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  caption { display: none; }
+  th, td {
+    padding: 11px 14px;
+    text-align: right;
+    font-size: 13.5px;
+    border-bottom: 1px solid var(--hairline);
+    white-space: nowrap;
+  }
+  th:first-child, td:first-child { text-align: left; }
+  thead th {
+    background: var(--surface-2);
+    color: var(--ink-secondary);
+    font-weight: 600;
+    font-size: 12px;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+  }
+  tbody td { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; color: var(--ink); }
+  tbody td:first-child { font-family: "IBM Plex Sans", sans-serif; font-weight: 600; }
+  tbody tr:last-child td { border-bottom: none; }
+  tbody tr:hover td { background: var(--surface-2); }
+  .group-swatch {
+    display: inline-block;
+    width: 9px; height: 9px;
+    border-radius: 2px;
+    margin-right: 8px;
+    vertical-align: middle;
+  }
+  .sweep-row-dim td { color: var(--ink-muted); }
+
+  /* ---------- charts ---------- */
+  .chart-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 20px;
+  }
+  @media (max-width: 720px) {
+    .chart-grid { grid-template-columns: 1fr; }
+  }
+  .chart-card {
+    position: relative;
+    background: var(--surface);
+    border: 1px solid var(--hairline);
+    border-radius: 10px;
+    padding: 18px 18px 14px;
+  }
+  .chart-card h3 {
+    margin: 0 0 2px;
+    font-size: 14.5px;
+    font-weight: 600;
+  }
+  .chart-card .axis-caption {
+    margin: 2px 0 0;
+    text-align: center;
+    font-size: 11.5px;
+    color: var(--ink-muted);
+    font-family: "IBM Plex Mono", monospace;
+  }
+  svg.linechart { width: 100%; height: auto; display: block; margin-top: 4px; }
+  .gridline { stroke: var(--hairline); stroke-width: 1; }
+  .axis-line { stroke: var(--hairline-strong); stroke-width: 1; }
+  .axis-label { font-family: "IBM Plex Mono", monospace; font-size: 9.5px; fill: var(--ink-muted); }
+  .y-label { text-anchor: end; dominant-baseline: middle; }
+  .x-label { text-anchor: middle; }
+  .series-line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+  .series-dot { stroke: var(--surface); stroke-width: 2; }
+  .hit-rect { fill: transparent; cursor: crosshair; }
+  .crosshair { stroke: var(--ink-muted); stroke-width: 1; stroke-dasharray: 2 3; pointer-events: none; }
+
+  .tooltip {
+    display: none;
+    position: absolute;
+    z-index: 5;
+    pointer-events: none;
+    background: var(--surface);
+    border: 1px solid var(--hairline-strong);
+    border-radius: 8px;
+    padding: 8px 10px;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.14);
+    font-size: 12px;
+    min-width: 148px;
+  }
+  .tooltip-head {
+    font-family: "IBM Plex Mono", monospace;
+    font-weight: 600;
+    color: var(--ink);
+    margin-bottom: 5px;
+  }
+  .tooltip-row { display: flex; align-items: center; gap: 6px; padding: 2px 0; }
+  .tooltip-key { width: 10px; height: 3px; border-radius: 2px; flex: none; }
+  .tooltip-name { color: var(--ink-secondary); flex: 1; }
+  .tooltip-value { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; font-weight: 600; color: var(--ink); }
+
+  .legend {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 18px;
+    font-size: 13px;
+    color: var(--ink-secondary);
+  }
+  .legend-item { display: flex; align-items: center; gap: 7px; }
+  .legend-key { width: 14px; height: 2px; border-radius: 2px; flex: none; }
+
+  /* ---------- notes ---------- */
+  .notes {
+    background: var(--accent-soft);
+    border: 1px solid var(--hairline);
+    border-radius: 10px;
+    padding: 18px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+  }
+  .notes h2 { font-size: 14.5px; }
+  .notes ul { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 7px; }
+  .notes li { font-size: 13.5px; line-height: 1.55; color: var(--ink-secondary); }
+  .notes b { color: var(--ink); font-weight: 600; }
+  .mono { font-family: "IBM Plex Mono", monospace; font-variant-numeric: tabular-nums; }
+
+  footer {
+    border-top: 1px solid var(--hairline);
+    padding-top: 18px;
+    font-size: 12px;
+    color: var(--ink-muted);
+    font-family: "IBM Plex Mono", monospace;
+  }
+</style>
+
+<div class="wrap">
+
+  <header>
+    <div class="eyebrow">test.py &middot; evaluate()</div>
+    <h1>Detection eval: Overall vs Person1 vs Person2</h1>
+    <p class="subhead">
+      Two separate matching criteria are reported side by side: the headline
+      recall/precision use nearest-center matching within 1.0&nbsp;m
+      (<span class="mono">MATCH_DIST_THRESHOLD_M</span>), while the sweep below
+      uses volume-only (axis-aligned) IoU with score-ranked greedy matching, swept
+      from IoU&nbsp;&ge;&nbsp;0.1 to 0.9.
+    </p>
+    <div class="runmeta">
+      <span><b>groups</b> Overall / Person1 / Person2</span>
+      <span><b>center match radius</b> 1.0 m</span>
+      <span><b>IoU sweep</b> 0.1 &ndash; 0.9, step 0.1</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>Summary &mdash; center-distance matching</h2>
+    <p class="section-note">One match per GT object, nearest predicted center within 1.0 m.</p>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr>
+            <th>Group</th>
+            <th>n_gt</th>
+            <th>n_det</th>
+            <th>n_matched</th>
+            <th>Recall</th>
+            <th>Precision</th>
+            <th>Mean center err (m)</th>
+            <th>Mean rot err (&deg;)</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td><span class="group-swatch" style="background:var(--series-overall)"></span>Overall</td>
+            <td>1623</td><td>1687</td><td>1148</td>
+            <td>0.7073</td><td>0.6805</td><td>0.3060</td><td>71.88</td>
+          </tr>
+          <tr>
+            <td><span class="group-swatch" style="background:var(--series-person1)"></span>Person1</td>
+            <td>1518</td><td>1467</td><td>1047</td>
+            <td>0.6897</td><td>0.7137</td><td>0.3146</td><td>64.98</td>
+          </tr>
+          <tr>
+            <td><span class="group-swatch" style="background:var(--series-person2)"></span>Person2</td>
+            <td>105</td><td>220</td><td>101</td>
+            <td>0.9619</td><td>0.4591</td><td>0.2172</td><td>143.41</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section>
+    <h2>Precision &amp; recall vs IoU threshold</h2>
+    <p class="section-note">Volume-only (axis-aligned) IoU, score-ranked greedy matching &mdash; each detection claims its best still-free GT if that pair's IoU clears the threshold on the x-axis.</p>
+    <div class="legend" id="sharedLegend">
+      <span class="legend-item"><span class="legend-key" style="background:var(--series-overall)"></span>Overall</span>
+      <span class="legend-item"><span class="legend-key" style="background:var(--series-person1)"></span>Person1</span>
+      <span class="legend-item"><span class="legend-key" style="background:var(--series-person2)"></span>Person2</span>
+    </div>
+    <div class="chart-grid">
+      <div class="chart-card">
+        <h3>Precision</h3>
+        <svg id="chartPrecision" class="linechart" viewBox="0 0 460 300"></svg>
+        <p class="axis-caption">IoU threshold (&ge;)</p>
+        <div class="tooltip" id="tipPrecision"></div>
+      </div>
+      <div class="chart-card">
+        <h3>Recall</h3>
+        <svg id="chartRecall" class="linechart" viewBox="0 0 460 300"></svg>
+        <p class="axis-caption">IoU threshold (&ge;)</p>
+        <div class="tooltip" id="tipRecall"></div>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Notes</h2>
+    <div class="notes">
+      <ul>
+        <li><b>Person2 over-detects.</b> n_det (220) is ~2.1&times; n_gt (105), driving precision down to 0.459 even though recall is 0.962 &mdash; consistent with duplicate local-max peaks per object rather than missed objects.</li>
+        <li><b>Rotation generalizes worse on Person2.</b> Mean rotation error is 143.4&deg; vs 65.0&deg; on Person1 (close to the ~90&deg; a random quaternion would average) &mdash; orientation prediction is not transferring to this person's poses.</li>
+        <li><b>Both metrics collapse past IoU&nbsp;&ge;&nbsp;0.5</b> for every group, in line with the ~0.31&nbsp;m mean center error already being a large fraction of a diver box's own footprint.</li>
+      </ul>
+    </div>
+  </section>
+
+  <section>
+    <h2>IoU sweep &mdash; full values</h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th colspan="4"><span class="group-swatch" style="background:var(--series-overall)"></span>Overall</th></tr>
+          <tr><th>IoU &ge;</th><th>Precision</th><th>Recall</th><th>Matched</th></tr>
+        </thead>
+        <tbody id="sweepOverall"></tbody>
+      </table>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th colspan="4"><span class="group-swatch" style="background:var(--series-person1)"></span>Person1</th></tr>
+          <tr><th>IoU &ge;</th><th>Precision</th><th>Recall</th><th>Matched</th></tr>
+        </thead>
+        <tbody id="sweepPerson1"></tbody>
+      </table>
+    </div>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th colspan="4"><span class="group-swatch" style="background:var(--series-person2)"></span>Person2</th></tr>
+          <tr><th>IoU &ge;</th><th>Precision</th><th>Recall</th><th>Matched</th></tr>
+        </thead>
+        <tbody id="sweepPerson2"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <footer>diver_net/test.py &mdash; evaluate() output, transcribed 2026-08-20</footer>
+
+</div>
+
+<script>
+(function () {
+  const thresholds = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9];
+
+  const data = {
+    overall: {
+      label: "Overall", key: "overall",
+      precision: [0.7084, 0.6858, 0.6319, 0.5252, 0.3657, 0.1761, 0.0427, 0.0030, 0.0000],
+      recall:    [0.7363, 0.7129, 0.6568, 0.5459, 0.3802, 0.1830, 0.0444, 0.0031, 0.0000],
+      matched:   [1195, 1157, 1066, 886, 617, 297, 72, 5, 0],
+    },
+    person1: {
+      label: "Person1", key: "person1",
+      precision: [0.7457, 0.7205, 0.6619, 0.5460, 0.3879, 0.1909, 0.0457, 0.0034, 0.0000],
+      recall:    [0.7207, 0.6963, 0.6397, 0.5277, 0.3748, 0.1845, 0.0441, 0.0033, 0.0000],
+      matched:   [1094, 1057, 971, 801, 569, 280, 67, 5, 0],
+    },
+    person2: {
+      label: "Person2", key: "person2",
+      precision: [0.4591, 0.4545, 0.4318, 0.3864, 0.2182, 0.0773, 0.0227, 0.0000, 0.0000],
+      recall:    [0.9619, 0.9524, 0.9048, 0.8095, 0.4571, 0.1619, 0.0476, 0.0000, 0.0000],
+      matched:   [101, 100, 95, 85, 48, 17, 5, 0, 0],
+    },
+  };
+  const groups = [data.overall, data.person1, data.person2];
+
+  const ns = "http://www.w3.org/2000/svg";
+  function el(tag, attrs) {
+    const e = document.createElementNS(ns, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+  function fmtTick(v) {
+    return (v === 0 || v === 1) ? String(v) : v.toFixed(2);
+  }
+
+  function renderLineChart(svgId, tipId, metricKey) {
+    const svg = document.getElementById(svgId);
+    const tooltip = document.getElementById(tipId);
+    const W = 460, H = 300;
+    const M = { top: 14, right: 14, bottom: 26, left: 34 };
+    const plotW = W - M.left - M.right;
+    const plotH = H - M.top - M.bottom;
+
+    const xScale = v => M.left + (v - thresholds[0]) / (thresholds[thresholds.length - 1] - thresholds[0]) * plotW;
+    const yScale = v => M.top + (1 - v) * plotH;
+
+    [0, 0.25, 0.5, 0.75, 1].forEach(gy => {
+      const y = yScale(gy);
+      svg.appendChild(el('line', { x1: M.left, x2: W - M.right, y1: y, y2: y, class: 'gridline' }));
+      const t = el('text', { x: M.left - 7, y: y + 3, class: 'axis-label y-label' });
+      t.textContent = fmtTick(gy);
+      svg.appendChild(t);
+    });
+    thresholds.forEach((xv, i) => {
+      if (i % 2 === 1) return; // every other tick to avoid crowding: 0.1,0.3,0.5,0.7,0.9
+      const x = xScale(xv);
+      const t = el('text', { x, y: H - M.bottom + 15, class: 'axis-label x-label' });
+      t.textContent = xv.toFixed(1);
+      svg.appendChild(t);
+    });
+    svg.appendChild(el('line', { x1: M.left, x2: M.left, y1: M.top, y2: H - M.bottom, class: 'axis-line' }));
+    svg.appendChild(el('line', { x1: M.left, x2: W - M.right, y1: H - M.bottom, y2: H - M.bottom, class: 'axis-line' }));
+
+    groups.forEach(g => {
+      const vals = g[metricKey];
+      const pts = thresholds.map((xv, i) => [xScale(xv), yScale(vals[i])]);
+      const d = pts.map((p, i) => (i === 0 ? 'M' : 'L') + p[0].toFixed(2) + ',' + p[1].toFixed(2)).join(' ');
+      svg.appendChild(el('path', { d, class: 'series-line', style: `stroke:var(--series-${g.key})` }));
+      pts.forEach(p => {
+        svg.appendChild(el('circle', { cx: p[0], cy: p[1], r: 3.2, class: 'series-dot', style: `fill:var(--series-${g.key})` }));
+      });
+    });
+
+    const crosshair = el('line', { x1: 0, x2: 0, y1: M.top, y2: H - M.bottom, class: 'crosshair' });
+    crosshair.style.display = 'none';
+    svg.appendChild(crosshair);
+    const hitRect = el('rect', { x: M.left, y: M.top, width: plotW, height: plotH, class: 'hit-rect' });
+    svg.appendChild(hitRect);
+
+    function handleMove(evt) {
+      const rect = svg.getBoundingClientRect();
+      const scaleX = W / rect.width;
+      const px = (evt.clientX - rect.left) * scaleX;
+      let nearest = 0, best = Infinity;
+      thresholds.forEach((xv, i) => {
+        const dd = Math.abs(xScale(xv) - px);
+        if (dd < best) { best = dd; nearest = i; }
+      });
+      const xv = thresholds[nearest];
+      const x = xScale(xv);
+      crosshair.setAttribute('x1', x);
+      crosshair.setAttribute('x2', x);
+      crosshair.style.display = 'block';
+
+      tooltip.textContent = '';
+      const head = document.createElement('div');
+      head.className = 'tooltip-head';
+      head.textContent = `IoU ≥ ${xv.toFixed(1)}`;
+      tooltip.appendChild(head);
+      groups.forEach(g => {
+        const row = document.createElement('div');
+        row.className = 'tooltip-row';
+        const key = document.createElement('span');
+        key.className = 'tooltip-key';
+        key.style.background = `var(--series-${g.key})`;
+        const name = document.createElement('span');
+        name.className = 'tooltip-name';
+        name.textContent = g.label;
+        const val = document.createElement('span');
+        val.className = 'tooltip-value';
+        val.textContent = g[metricKey][nearest].toFixed(4);
+        row.appendChild(key); row.appendChild(name); row.appendChild(val);
+        tooltip.appendChild(row);
+      });
+
+      const card = svg.closest('.chart-card').getBoundingClientRect();
+      let left = (evt.clientX - card.left) + 14;
+      let top = (evt.clientY - card.top) + 14;
+      if (left > card.width - 160) left = (evt.clientX - card.left) - 172;
+      tooltip.style.left = left + 'px';
+      tooltip.style.top = top + 'px';
+      tooltip.style.display = 'block';
+    }
+    hitRect.addEventListener('pointermove', handleMove);
+    hitRect.addEventListener('pointerleave', () => {
+      tooltip.style.display = 'none';
+      crosshair.style.display = 'none';
+    });
+    hitRect.addEventListener('focus', handleMove);
+  }
+
+  renderLineChart('chartPrecision', 'tipPrecision', 'precision');
+  renderLineChart('chartRecall', 'tipRecall', 'recall');
+
+  function fillSweepTable(tbodyId, group) {
+    const tbody = document.getElementById(tbodyId);
+    thresholds.forEach((xv, i) => {
+      const tr = document.createElement('tr');
+      if (group.matched[i] === 0) tr.className = 'sweep-row-dim';
+      const cells = [
+        xv.toFixed(1),
+        group.precision[i].toFixed(4),
+        group.recall[i].toFixed(4),
+        String(group.matched[i]),
+      ];
+      cells.forEach(text => {
+        const td = document.createElement('td');
+        td.textContent = text;
+        tr.appendChild(td);
+      });
+      tbody.appendChild(tr);
+    });
+  }
+  fillSweepTable('sweepOverall', data.overall);
+  fillSweepTable('sweepPerson1', data.person1);
+  fillSweepTable('sweepPerson2', data.person2);
+})();
+</script>

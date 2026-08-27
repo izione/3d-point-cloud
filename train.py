@@ -125,13 +125,13 @@ def main():
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=opt_cfg["LR"], weight_decay=opt_cfg["WEIGHT_DECAY"])
     steps_per_epoch = len(train_loader)
-    # +15% slack: a mid-epoch resume re-runs that epoch's steps, so the true
-    # step count can exceed steps_per_epoch*num_epochs. OneCycleLR raises a
-    # hard error if .step() is called past total_steps, so this buffer is
-    # what keeps a resumed run from crashing near the end of training. With
-    # zero resumes the schedule just never quite reaches its planned minimum
-    # LR -- a minor imperfection, safer than the alternative.
-    total_steps = int(steps_per_epoch * num_epochs * 1.15)
+    # No slack buffer needed here (unlike an earlier version of this file): a
+    # mid-epoch resume re-runs that epoch's steps, which used to risk exceeding
+    # steps_per_epoch*num_epochs and crashing OneCycleLR -- but the scheduler
+    # below is now rebuilt fresh at resume time (see the last_epoch= comment),
+    # sized off *this* run's steps_per_epoch, so it can no longer inherit a
+    # stale/too-small total_steps from a checkpoint at all.
+    total_steps = steps_per_epoch * num_epochs
 
     start_epoch, global_step = 0, 0
     ckpt = None

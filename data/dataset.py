@@ -84,15 +84,21 @@ class SonarDiverDataset(Dataset):
         with open(label_path) as f:
             label = json.load(f)
         objs = label.get("objects", [])
-        boxes = np.zeros((len(objs), 10), dtype=np.float32)
-        for i, obj in enumerate(objs):
+        boxes = []
+        for obj in objs:
+            if "quaternion" not in obj:
+                # some auto_track.py-propagated labels have centroid/dimensions/
+                # rotations but no quaternion (a bug in that script's writer --
+                # it never computes one) -- drop just this object rather than
+                # crash the whole frame/batch on it.
+                continue
             c, d, q = obj["centroid"], obj["dimensions"], obj["quaternion"]
-            boxes[i] = [
+            boxes.append([
                 c["x"], c["y"], c["z"],
                 d["length"], d["width"], d["height"],
                 q["w"], q["x"], q["y"], q["z"],
-            ]
-        return boxes
+            ])
+        return np.array(boxes, dtype=np.float32).reshape(-1, 10)
 
     def __getitem__(self, idx):
         sonar_path = self.samples[idx]

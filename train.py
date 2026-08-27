@@ -131,7 +131,7 @@ def main():
     # what keeps a resumed run from crashing near the end of training. With
     # zero resumes the schedule just never quite reaches its planned minimum
     # LR -- a minor imperfection, safer than the alternative.
-    total_steps = int(steps_per_epoch * num_epochs * 1.15)
+    total_steps = steps_per_epoch * num_epochs
     scheduler = torch.optim.lr_scheduler.OneCycleLR(
         optimizer, max_lr=opt_cfg["LR"], total_steps=total_steps,
         pct_start=opt_cfg["PCT_START"], div_factor=opt_cfg["DIV_FACTOR"],

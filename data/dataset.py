@@ -1,5 +1,6 @@
 import json
 import os
+import random
 from pathlib import Path
 
 import numpy as np
@@ -11,8 +12,28 @@ def _label_path_for(sonar_path: Path) -> Path:
     return sonar_path.parent.parent / "labels" / (sonar_path.stem + ".json")
 
 
+def _list_scene_frames(root: Path, scene_ids: list) -> list:
+    frames = []
+    for scene_id in scene_ids:
+        sonar_dir = root / scene_id / "sonar"
+        if not sonar_dir.is_dir():
+            raise FileNotFoundError(f"expected sonar dir at {sonar_dir}")
+        frames.extend(sorted(sonar_dir.glob("frame_*.bin")))
+    return frames
+
+
 class SonarDiverDataset(Dataset):
-    """Reads raw sonar .bin frames + JSON labels for the Person1+2-only scene split.
+    """Reads raw sonar .bin frames + JSON labels for the 4-person scene split.
+
+    TEST is a genuine held-out set of whole scenes (DATA.TEST_SCENES) - no frame
+    from a test scene ever appears in train/val, so it measures generalization to
+    an unseen scene, not just an unseen frame. TRAIN/VAL are instead a frame-level
+    random split of DATA.TRAINVAL_SCENES pooled together (deterministic, seeded by
+    DATA.SPLIT_SEED): every non-test scene contributes frames to both train and
+    val, so val loss reflects "how well is training going" across the full pose/
+    scene diversity, rather than "how well does it generalize to a couple of
+    held-out scenes" (that's what TEST is for). DATA.VAL_FRAME_RATIO controls the
+    split fraction (default 0.1).
 
     Each item returns raw points (already filtered to the point-cloud range) and
     GT boxes as (cx, cy, cz, length, width, height, qw, qx, qy, qz). Voxelization
@@ -27,20 +48,19 @@ class SonarDiverDataset(Dataset):
         self.root = Path(cfg["DATA"]["ROOT"])
         self.pc_range = np.array(cfg["DATA"]["POINT_CLOUD_RANGE"], dtype=np.float32)
 
-        scene_key = {"train": "TRAIN_SCENES", "val": "VAL_SCENES", "test": "TEST_SCENES"}[split]
-        scene_ids = cfg["DATA"][scene_key]
-
-        self.samples = []
-        for scene_id in scene_ids:
-            scene_dir = self.root / scene_id
-            sonar_dir = scene_dir / "sonar"
-            if not sonar_dir.is_dir():
-                raise FileNotFoundError(f"expected sonar dir at {sonar_dir}")
-            for f in sorted(sonar_dir.glob("frame_*.bin")):
-                self.samples.append(f)
+        if split == "test":
+            self.samples = _list_scene_frames(self.root, cfg["DATA"]["TEST_SCENES"])
+        else:
+            all_frames = _list_scene_frames(self.root, cfg["DATA"]["TRAINVAL_SCENES"])
+            all_frames.sort(key=lambda p: str(p))  # deterministic order before shuffling
+            rng = random.Random(cfg["DATA"].get("SPLIT_SEED", 42))
+            rng.shuffle(all_frames)
+            val_ratio = cfg["DATA"].get("VAL_FRAME_RATIO", 0.1)
+            n_val = round(len(all_frames) * val_ratio)
+            self.samples = all_frames[:n_val] if split == "val" else all_frames[n_val:]
 
         if len(self.samples) == 0:
-            raise RuntimeError(f"no frames found for split={split} under scenes={scene_ids}")
+            raise RuntimeError(f"no frames found for split={split}")
 
     def __len__(self):
         return len(self.samples)

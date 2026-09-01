@@ -19,13 +19,23 @@ BASE_CONFIG: default.yaml
 
 BACKBONE:
   TYPE: sparse_unet
-  STAGE_CHANNELS: [64, 96, 128]   # 3-stage encoder (bottleneck receptive field >> the 1-stage default's)
-  NUM_BLOCKS_PER_STAGE: 2          # trimmed from default's 3 since this is now 3 stages, not 1
-  DECODER_BLOCKS_PER_STAGE: 2      # sparse_unet-only knob; omit to mirror NUM_BLOCKS_PER_STAGE
-  DECODER_OUT_CHANNELS: 128        # match the other experiments' head input width (128) -- the
-                                    # default fallback (max(STAGE_CHANNELS[0], VFE out_channels)) would
-                                    # give 64 here since STAGE_CHANNELS[0]==VFE's 64, smaller than every
-                                    # other exp_*.yaml's head input.
+  STAGE_CHANNELS: [32, 48, 64]     # 2026-09-02: cut roughly in half (was [64,96,128]) -- a real Colab
+                                    # run at the old width measured ~3h20m/epoch *on an A100* (NUM_EPOCHS=20
+                                    # would be ~66h total). Confirmed this isn't a vectorization bug
+                                    # (sparse_ops.SparseInverseConv3d is already gather+einsum, no k^3
+                                    # Python loop) -- it's the decoder's shallowest stage doing real
+                                    # conv+residual work at close to the *full, pre-downsample* active-voxel
+                                    # count (the whole point of restoring resolution), which a narrower
+                                    # width directly cuts the cost of. Re-measure with the timed cell in
+                                    # colab_train.ipynb's step 5 before trusting this width either.
+  NUM_BLOCKS_PER_STAGE: 1           # cut from 2 -- halves the encoder's per-stage conv count too
+  DECODER_BLOCKS_PER_STAGE: 1       # cut from 2 -- this is the more expensive half (see STAGE_CHANNELS
+                                    # comment: shallow decoder stages see the most voxels), so shrinking
+                                    # it matters more per-layer than the encoder's
+  DECODER_OUT_CHANNELS: 64          # matches the new STAGE_CHANNELS[0] exactly now (no upward projection
+                                    # needed) -- smaller than the other exp_*.yaml's 128 head input width,
+                                    # which is an intentional part of the same cost-cutting; revisit once
+                                    # this config's own wall-clock time is actually tractable.
   # DOWNSAMPLE_KERNEL / DOWNSAMPLE_STRIDE inherited from default.yaml (3 / 2, isotropic).
 
 SLOTFORMER:
@@ -35,15 +45,14 @@ SLOTFORMER:
                     # exp_sparse_unet_slotformer.yaml with ENABLED: true instead of assuming U-Net
                     # alone is a strict upgrade.
 
-# NOT measured on real hardware yet -- no GPU was available while wiring this
-# up, unlike every other exp_*.yaml's OPTIMIZATION comment (which all cite an
-# actual measured GiB/% figure). Encoder+decoder is roughly 2x the conv
-# layers of the encoder-only backbones at a similar STAGE_CHANNELS width, so
-# treat BATCH_SIZE below as a cautious starting guess (borrowed from
-# exp_sparse_no_slotformer's already-linear-scaled LR at the same batch size)
-# rather than a validated number -- measure a few real steps on your GPU
-# before a full run, same as every other config here says to, and update
-# this comment with what you actually measured.
+# NOT measured on real hardware yet at this (shrunk) width -- the previous width's real Colab
+# measurement (~3h20m/epoch on an A100, see STAGE_CHANNELS comment) is why this got cut down;
+# BATCH_SIZE/LR below are unchanged from that measurement and still need re-checking at the new,
+# smaller width via colab_train.ipynb's step 5 (both memory AND the new timing print) before a full run.
 OPTIMIZATION:
   BATCH_SIZE: 8
   LR: 0.006
+  NUM_EPOCHS: 6   # cut from default.yaml's 20 -- a directional signal (is sparse_unet even in the
+                  # ballpark of exp_sparse_slotformer_3l's val_loss) matters more here than a fully
+                  # converged model, given the wall-clock cost; bump back up once the per-epoch time
+                  # at this shrunk width is confirmed tractable

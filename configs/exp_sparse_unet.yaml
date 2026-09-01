@@ -45,13 +45,15 @@ SLOTFORMER:
                     # exp_sparse_unet_slotformer.yaml with ENABLED: true instead of assuming U-Net
                     # alone is a strict upgrade.
 
-# NOT measured on real hardware yet at this (shrunk) width -- the previous width's real Colab
-# measurement (~3h20m/epoch on an A100, see STAGE_CHANNELS comment) is why this got cut down;
-# BATCH_SIZE/LR below are unchanged from that measurement and still need re-checking at the new,
-# smaller width via colab_train.ipynb's step 5 (both memory AND the new timing print) before a full run.
+# At this shrunk width, batch=8 measured only 8% GPU memory (2.97/39.5 GiB) -- a real Colab run,
+# confirmed via colab_train.ipynb's step 5. That headroom is why BATCH_SIZE was bumped 8->64 (LR
+# scaled linearly to match). NOTE: step 5's timing cell had a bug where BATCH_SIZE_TO_TEST was
+# hardcoded to 8 regardless of this file's OPTIMIZATION.BATCH_SIZE (now fixed to read from the
+# config) -- so batch=64 has NOT actually been timed yet. Re-run step 5 before trusting NUM_EPOCHS'
+# wall-clock estimate at this batch size.
 OPTIMIZATION:
-  BATCH_SIZE: 8
-  LR: 0.006
+  BATCH_SIZE: 64
+  LR: 0.048   # 0.006 * (64/8), linear scaling (SLOTFORMER.ENABLED: false here)
   NUM_EPOCHS: 6   # cut from default.yaml's 20 -- a directional signal (is sparse_unet even in the
                   # ballpark of exp_sparse_slotformer_3l's val_loss) matters more here than a fully
                   # converged model, given the wall-clock cost; bump back up once the per-epoch time

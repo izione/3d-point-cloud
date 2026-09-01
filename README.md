@@ -16,6 +16,13 @@ construction time) -- see "3D backbone: pure-PyTorch vs spconv" below.
 
 ## Colab setup
 
+`colab_train.ipynb` (this repo, `unet` branch) walks through everything below
+as runnable cells -- clone/install, Drive mount + `DATA.ROOT` patching, a
+synthetic-data sanity check, a real-data batch-size safety check for
+`exp_sparse_unet.yaml` specifically, training, and evaluation. Upload it to
+Colab (File -> Upload notebook, or open directly from GitHub) rather than
+retyping the snippet below by hand.
+
 ```python
 !git clone -b unet https://github.com/izione/3d-point-cloud.git
 %cd 3d-point-cloud

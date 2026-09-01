@@ -49,6 +49,7 @@ from models.sparse_ops import build_index_grid
 from models.backbone3d import Sparse3DBackbone
 from models.backbone3d_dense import Dense3DBackbone
 from models.backbone3d_auto import spconv_usable
+from models.backbone_registry import build_backbone
 from models.slotformer import SlotFormerBackbone
 
 
@@ -138,17 +139,30 @@ def main():
           f"num_blocks_per_stage={bcfg['NUM_BLOCKS_PER_STAGE']}  "
           f"kernel={bcfg['DOWNSAMPLE_KERNEL']}  stride={bcfg['DOWNSAMPLE_STRIDE']} (same for all backbones)")
 
-    sparse_backbone = Sparse3DBackbone(*backbone_args).to(device).eval()
-
-    spconv_backbone = None
-    if not args.skip_spconv and spconv_usable():
-        from models.backbone3d_spconv import Sparse3DBackboneSpconv
-        spconv_backbone = Sparse3DBackboneSpconv(*backbone_args).to(device).eval()
-        print("spconv backbone: enabled")
+    backbone_type = bcfg.get("TYPE", "auto")
+    if backbone_type == "sparse_unet":
+        # sparse_unet's decoder restores full resolution (total_stride=1) and has no
+        # dense/spconv architecture-matched counterpart to compare against -- it isn't one
+        # of the three interchangeable encoder-only backbones this script was built to
+        # compare, so just time it alone via the registry (same interface, see
+        # backbone_registry.py) instead of forcing it through backbone_args' fixed signature.
+        print("BACKBONE.TYPE=sparse_unet: timing it alone (no dense/spconv counterpart, no SlotFormer combo)")
+        sparse_backbone = build_backbone(vfe.out_channels, bcfg).to(device).eval()
+        spconv_backbone = None
+        dense_backbone = None
+        args.skip_slotformer = True
     else:
-        print("spconv backbone: skipped (not usable here or --skip_spconv)")
+        sparse_backbone = Sparse3DBackbone(*backbone_args).to(device).eval()
 
-    dense_backbone = None if args.skip_dense else Dense3DBackbone(*backbone_args).to(device).eval()
+        spconv_backbone = None
+        if not args.skip_spconv and spconv_usable():
+            from models.backbone3d_spconv import Sparse3DBackboneSpconv
+            spconv_backbone = Sparse3DBackboneSpconv(*backbone_args).to(device).eval()
+            print("spconv backbone: enabled")
+        else:
+            print("spconv backbone: skipped (not usable here or --skip_spconv)")
+
+        dense_backbone = None if args.skip_dense else Dense3DBackbone(*backbone_args).to(device).eval()
 
     scfg = cfg["SLOTFORMER"]
     slotformers = {}  # num_cycles -> module
@@ -162,7 +176,7 @@ def main():
     else:
         print("SlotFormer: skipped (--skip_slotformer)")
 
-    sparse_backends = {"sparse (pytorch)": sparse_backbone}
+    sparse_backends = {"sparse_unet" if backbone_type == "sparse_unet" else "sparse (pytorch)": sparse_backbone}
     if spconv_backbone is not None:
         sparse_backends["sparse (spconv)"] = spconv_backbone
 

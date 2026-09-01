@@ -1,4 +1,4 @@
-"""Runs all 4 backbone/SlotFormer experiments back-to-back with train.py,
+"""Runs all 5 backbone/SlotFormer experiments back-to-back with train.py,
 each into its own --ckpt_dir (same naming as the `python train.py ...` command
 documented in each configs/exp_*.yaml's header comment) and its own --exp_name
 (the short name below, e.g. "sparse_no_slotformer") so checkpoint/loss-log
@@ -10,9 +10,10 @@ filenames are self-descriptive even if dirs ever get consolidated:
     2. sparse backbone, no SlotFormer       -> configs/exp_sparse_no_slotformer.yaml
     3. sparse backbone + SlotFormer 3L      -> configs/exp_sparse_slotformer_3l.yaml
     4. sparse backbone + SlotFormer 6L      -> configs/exp_sparse_slotformer_6l.yaml
+    5. sparse 3D U-Net (encoder-decoder)    -> configs/exp_sparse_unet.yaml
 
 Meant to be run once the real dataset (data/dataset.py's SonarDiverDataset) is
-in place -- until then, use smoke_test.py to sanity-check the 4 configs
+in place -- until then, use smoke_test.py to sanity-check the 5 configs
 end-to-end against synthetic data.
 
 Usage:
@@ -29,6 +30,7 @@ EXPERIMENTS = [
     ("sparse_no_slotformer", "configs/exp_sparse_no_slotformer.yaml", "checkpoints_sparse_no_slotformer"),
     ("sparse_slotformer_3l", "configs/exp_sparse_slotformer_3l.yaml", "checkpoints_sparse_slotformer_3l"),
     ("sparse_slotformer_6l", "configs/exp_sparse_slotformer_6l.yaml", "checkpoints_sparse_slotformer_6l"),
+    ("sparse_unet", "configs/exp_sparse_unet.yaml", "checkpoints_sparse_unet"),
 ]
 
 

@@ -17,19 +17,20 @@ construction time) -- see "3D backbone: pure-PyTorch vs spconv" below.
 ## Colab setup
 
 ```python
-!git clone -b slotformer https://github.com/izione/3d-point-cloud.git
+!git clone -b unet https://github.com/izione/3d-point-cloud.git
 %cd 3d-point-cloud
 !pip install -r requirements.txt
 
 # mount the dataset (adjust to wherever you uploaded dataset/)
 from google.colab import drive
 drive.mount('/content/drive')
-# then edit configs/default.yaml -> DATA.ROOT to point at it
+# then edit configs/default.yaml -> DATA.ROOT to point at it (e.g.
+# "/content/drive/MyDrive/<wherever you uploaded PersonX/scene_XXXX/{sonar,labels}>")
 ```
 
-The model code lives on the `slotformer` branch specifically (this repo also holds
-other model experiments on other branches) -- a plain `git clone` without `-b
-slotformer` checks out `main` instead and won't have these files.
+The model code lives on the `unet` branch specifically (this repo also holds
+other model experiments on other branches, e.g. `slotformer`) -- a plain `git
+clone` without `-b unet` checks out `main` instead and won't have these files.
 
 Confirm a GPU runtime is attached: Runtime -> Change runtime type -> T4 GPU (or better).
 

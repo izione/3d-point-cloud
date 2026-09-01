@@ -5,10 +5,10 @@ from collections import defaultdict
 from pathlib import Path
 
 import torch
-import yaml
 from torch.utils.data import DataLoader
 
 import models.slotformer as slotformer
+from config_utils import load_config
 from data.dataset import SonarDiverDataset, collate_fn
 from models.detector import DiverDetector
 from models.decode import decode_detections
@@ -313,7 +313,7 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     ckpt = torch.load(args.checkpoint, map_location=device)
-    cfg = yaml.safe_load(open(args.config)) if args.config else ckpt["cfg"]
+    cfg = load_config(args.config) if args.config else ckpt["cfg"]
 
     if args.attention_kind:
         slotformer.ATTENTION_KIND = args.attention_kind

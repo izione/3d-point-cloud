@@ -1,0 +1,26 @@
+# Experiment 3/4: sparse 3D backbone + SlotFormer at 3 layers (NUM_CYCLES=1,
+# one x/y/z pass) -- this matches configs/default.yaml's current values
+# exactly; kept as its own file so all 4 experiments have a matching
+# --config/--ckpt_dir naming convention.
+#
+# python train.py --config configs/exp_sparse_slotformer_3l.yaml --ckpt_dir checkpoints_sparse_slotformer_3l
+BASE_CONFIG: default.yaml
+
+SLOTFORMER:
+  ENABLED: true
+  NUM_CYCLES: 1
+
+# Back on DATA.VOXEL_SIZE 0.2 (see default.yaml's comment -- 0.1 roughly
+# doubled training time for an unproven accuracy gain). Measured on RTX
+# 2070/Windows via train.py itself over 250+ real steps: batch=8 plateaued
+# ~4.7GiB/57%, safely repeatable.
+#
+# LR: sqrt-scaled (0.003 * sqrt(BATCH_SIZE/4)) rather than the plain linear
+# scaling exp_sparse_no_slotformer.yaml uses -- at the old (deeper) backbone,
+# this same SlotFormer config diverged at a linear-scaled LR (train_loss
+# plateaued, val's center-loss term spiked, see git history) but trained
+# cleanly once switched to sqrt scaling, so applying it here pre-emptively
+# rather than re-discovering the same divergence with the new backbone.
+OPTIMIZATION:
+  BATCH_SIZE: 8
+  LR: 0.00424

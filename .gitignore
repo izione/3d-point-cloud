@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 checkpoints/
 checkpoints_smoke/
+checkpoints_*/
+.venv/

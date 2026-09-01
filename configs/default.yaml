@@ -7,8 +7,14 @@
 # the .py file instead). Everything else IS actually read from this file.
 
 DATA:
-  ROOT: "../dataset"          # relative to diver_net/ ; change to absolute path or Drive mount on Colab
-  VOXEL_SIZE: [0.2, 0.2, 0.2]
+  ROOT: "../labeling-tool-main/dataset"   # PersonX/scene_XXXX/{sonar,labels} -- relative to 3d-point-cloud/ ; change to absolute path or Drive mount on Colab
+  VOXEL_SIZE: [0.2, 0.2, 0.2]   # 2026-08-31: BACKBONE below is single-stage/stride-2, so 0.2 reproduces
+                                 # the last committed (stem.py-based) checkpoint's proven 0.4m effective
+                                 # resolution and precision=0.68/recall=0.71 (see git history/
+                                 # per_frame_val.json). Tried 0.1 (0.2m effective, finer/never validated)
+                                 # but training time roughly doubled (more active voxels -> smaller batch
+                                 # sizes needed -> more steps/epoch) for an unproven accuracy gain -- back
+                                 # to 0.2 for now. Revisit 0.1 later once 0.2 has a real baseline result.
   POINT_CLOUD_RANGE: [0.0, -11.4, -5.6, 16.2, 11.4, 5.6]   # xmin,ymin,zmin,xmax,ymax,zmax
   # TEST is a genuine held-out scene split over all 4 persons (Person3/4 relabeled
   # for quality and re-included; previously excluded for inconsistent rotation
@@ -16,20 +22,21 @@ DATA:
   # scene_0078 stays pinned here since it was already TEST before this split
   # existed; the other two were a seed-42 random pick.
   #
-  # Person2/scene_0050, scene_0079, scene_0091 are excluded entirely (not in
-  # TEST or TRAINVAL) -- they predate the Person3/4-era relabeling pass and
-  # haven't been re-verified yet. Add them back to TRAINVAL_SCENES once
-  # relabeled.
+  # All previously-excluded Person2 scenes are now relabeled and back in
+  # TRAINVAL_SCENES: scene_0050/scene_0091 (2026-08-30), scene_0079 (2026-08-31).
   TEST_SCENES:
     - "Person2/scene_0078"
     - "Person3/scene_0067"
     - "Person3/scene_0019"
   # TRAIN and VAL are instead a frame-level random split of this pool (see
-  # SonarDiverDataset): every one of these 26 scenes contributes frames to BOTH
+  # SonarDiverDataset): every one of these 29 scenes contributes frames to BOTH
   # train and val, so val loss tracks "how well is training going" across the
   # full pose/scene diversity, rather than generalization to a couple of unseen
   # scenes (that's what TEST measures).
   TRAINVAL_SCENES:
+    - "Person2/scene_0050"
+    - "Person2/scene_0091"
+    - "Person2/scene_0079"
     - "Person1/scene_0068"
     - "Person1/scene_0063"
     - "Person2/scene_0089"
@@ -66,16 +73,36 @@ VFE:
   WITH_DISTANCE: false         # [not read by code] fixed in models/vfe.py (10D = xyz+intensity+cluster_offset+center_offset, no distance term)
   USE_ABSOLUTE_XYZ: true       # [not read by code] fixed in models/vfe.py
 
-STEM:
-  IN_CHANNELS: 64
-  OUT_CHANNELS: 128
-  NUM_BASIC_BLOCKS: 3
-  DOWNSAMPLE_KERNEL: 3
-  DOWNSAMPLE_STRIDE: 2          # isotropic on x,y,z (NOT z-only like FSHNet original) -- all 5 fields above actually read (models/stem.py via detector.py)
-
 BACKBONE:
-  FEATURE_DIM: 128              # actually read
-  WIN_SIZE: 12                  # actually read -- in stem-output voxels (=4.8m at stem-output resolution)
+  # Single-stage 3D sparse conv backbone (models/backbone3d.py) -- reverted
+  # 2026-08-31 to match the old committed models/stem.py's depth/capacity
+  # exactly (see DATA.VOXEL_SIZE's comment for why: the 4-stage/stride-16
+  # version this replaced tanked precision/recall). One strided
+  # SparseConv3dDown (changes channels + downsamples x,y,z together --
+  # isotropic, NOT z-only like FSHNet original) followed by
+  # NUM_BLOCKS_PER_STAGE SubMConv3d residual blocks. No 2D/BEV backbone
+  # follows -- per-voxel 3D coords (incl. z) reach the head unchanged, so
+  # height information is never collapsed away.
+  STAGE_CHANNELS: [128]        # actually read -- single stage, matches old STEM.OUT_CHANNELS
+  NUM_BLOCKS_PER_STAGE: 3       # actually read -- matches old STEM.NUM_BASIC_BLOCKS
+  DOWNSAMPLE_KERNEL: 3           # actually read
+  DOWNSAMPLE_STRIDE: 2           # actually read -- total stride = 2 (one stage), matching the old stem
+  TYPE: auto                     # actually read (models/backbone3d_auto.py) -- "auto" (spconv if it's
+                                  # installed and actually works on this GPU, else the pure-PyTorch
+                                  # fallback -- see README) or "dense" (nn.Conv3d over the full voxel
+                                  # grid, no sparsity at all -- see configs/exp_dense.yaml). Experiment
+                                  # configs comparing backbone/SlotFormer combinations: configs/exp_*.yaml.
+  NAME: Sparse3D                 # [not read by code] descriptive only
+
+SLOTFORMER:
+  # Attention-based refinement stage that runs AFTER the 3D sparse conv backbone
+  # above, on its output voxels (channels = BACKBONE.STAGE_CHANNELS[-1]) -- see
+  # models/slotformer.py. Unchanged from before the 3D backbone rework.
+  ENABLED: true                 # actually read -- set false to skip SlotFormer entirely. The dense backbone
+                                 # already has a whole-grid receptive field (that's what SlotFormer exists to
+                                 # give the sparse backbones), so configs/exp_dense.yaml sets this false.
+  WIN_SIZE: 12                  # actually read -- in 3D-backbone-output voxels (=4.8m at the current 0.4m
+                                 # effective resolution, matching the old stem-based checkpoint's window)
   NUM_CYCLES: 1                 # actually read -- x,y,z once = 3 SFLayers total; one full x->y->z pass
                                  # already gives every voxel a global 3D receptive field, so this trades
                                  # away representational depth (not receptive field) to fight overfitting.
@@ -99,7 +126,7 @@ DENSE_HEAD:
   BOX_HEAD:
     NUM_CONV: 2                  # actually read
     OUTPUT_CHANNELS: 7           # actually read -- w,l,h,qw,qx,qy,qz
-  SHARED_CONV_CHANNELS: 128      # [not read by code] there is no separate shared trunk before the 3 heads
+  SHARED_CONV_CHANNELS: 128      # [not read by code] there is no separate shared trunk before the 3 heads -- heads take the backbone's last-stage channel count (BACKBONE.STAGE_CHANNELS[-1]) directly
 
 ASSIGNER:
   CLS_WEIGHT: 1.0                # actually read
@@ -128,8 +155,13 @@ OPTIMIZATION:
   PCT_START: 0.1
   DIV_FACTOR: 100
   GRAD_NORM_CLIP: 10
-  BATCH_SIZE: 64
-  NUM_EPOCHS: 20
+  BATCH_SIZE: 64                 # measured on RTX 2070 (8GB), sparse-no-slotformer config: 64->~5.8GB/71%
+                                  # (safe headroom); 80 and 96 both measured 94-96% -- real batches vary in
+                                  # active-voxel count per scene enough that either risks an OOM mid-run
+  NUM_EPOCHS: 20                # reverted resolution (0.4m effective) means far more active voxels
+                                 # survive to the head than the old 4-stage/16x backbone, so wall-clock
+                                 # per epoch is much higher now -- 20 epochs keeps the 3 sparse experiments
+                                 # (see exp_*.yaml's own BATCH_SIZE/LR) in the ~9-20h range instead of 18-40h
   CKPT_EVERY_N_EPOCHS: 1
   CKPT_EVERY_N_STEPS: 500        # extra safety checkpoint mid-epoch
   NUM_WORKERS: 10  # this Colab instance only got 2 CPU cores -- leave 1 for the

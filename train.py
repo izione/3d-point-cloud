@@ -1,14 +1,29 @@
 import argparse
 import csv
+import os
 import time
 from pathlib import Path
 
+# Must be set before the first CUDA call (torch import triggers context init on
+# some setups, but setting it before `import torch` is the safe order either
+# way). Without this, the caching allocator's reserved-memory pool creeps up
+# over hundreds of steps on this project's wildly variable per-batch active-
+# voxel counts instead of reusing already-reserved blocks (measured on RTX
+# 2070/Linux-style allocator: BATCH_SIZE=16 on exp_sparse_no_slotformer.yaml
+# ran away past 10GiB reserved by step 100 without this, vs. a flat 6.3GiB
+# with it). CUDACachingAllocator prints "expandable_segments not supported on
+# this platform" and silently no-ops THIS on Windows, though -- every
+# exp_*.yaml's BATCH_SIZE was measured without it actually active (i.e. the
+# Windows-real number), so don't bump batch sizes assuming this is helping
+# unless you've confirmed it's not printing that warning.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import torch
-import yaml
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import models.slotformer as slotformer
+from config_utils import load_config
 from data.dataset import SonarDiverDataset, collate_fn
 from models.detector import DiverDetector
 
@@ -97,17 +112,22 @@ def main():
     parser.add_argument("--ckpt_dir", default="checkpoints")
     parser.add_argument("--resume", default=None, help="path to a checkpoint to resume from")
     parser.add_argument("--epochs", type=int, default=None, help="override OPTIMIZATION.NUM_EPOCHS")
-    parser.add_argument("--log_file", default=None, help="defaults to <ckpt_dir>/loss_history.csv")
+    parser.add_argument("--exp_name", default=None,
+                         help="prefix for loss_history/checkpoint filenames (default: the config file's stem, "
+                              "e.g. configs/exp_sparse_slotformer_3l.yaml -> exp_sparse_slotformer_3l)")
+    parser.add_argument("--log_file", default=None, help="defaults to <ckpt_dir>/<exp_name>_loss_history.csv")
     parser.add_argument("--attention_kind", choices=["softmax", "linear"], default=None,
                          help="override models.slotformer.ATTENTION_KIND (default: whatever's hardcoded there)")
     args = parser.parse_args()
+
+    exp_name = args.exp_name or Path(args.config).stem
+    print(f"exp_name: {exp_name}")
 
     if args.attention_kind:
         slotformer.ATTENTION_KIND = args.attention_kind
     print(f"SlotFormer attention kind: {slotformer.ATTENTION_KIND}")
 
-    with open(args.config) as f:
-        cfg = yaml.safe_load(f)
+    cfg = load_config(args.config)
 
     opt_cfg = cfg["OPTIMIZATION"]
     num_epochs = args.epochs or opt_cfg["NUM_EPOCHS"]
@@ -166,7 +186,7 @@ def main():
     ckpt_dir = Path(args.ckpt_dir)
     ckpt_every_epochs = opt_cfg["CKPT_EVERY_N_EPOCHS"]
     ckpt_every_steps = opt_cfg["CKPT_EVERY_N_STEPS"]
-    log_path = Path(args.log_file) if args.log_file else ckpt_dir / "loss_history.csv"
+    log_path = Path(args.log_file) if args.log_file else ckpt_dir / f"{exp_name}_loss_history.csv"
     logger = LossLogger(log_path)
     print(f"logging per-step/per-epoch losses to {log_path}")
 
@@ -196,7 +216,7 @@ def main():
             })
 
             if ckpt_every_steps and global_step % ckpt_every_steps == 0:
-                save_checkpoint(ckpt_dir / f"step_{global_step}.pth", model, optimizer, scheduler, epoch, global_step, cfg, epoch_complete=False)
+                save_checkpoint(ckpt_dir / f"{exp_name}_step_{global_step}.pth", model, optimizer, scheduler, epoch, global_step, cfg, epoch_complete=False)
 
         epoch_time = time.time() - epoch_t0
         avg_train_loss = running_loss / max(len(train_loader), 1)
@@ -205,9 +225,9 @@ def main():
         print(f"epoch {epoch}: train_loss={avg_train_loss:.4f} val_loss={val_losses['total']:.4f} time={epoch_time:.1f}s")
 
         if ckpt_every_epochs and (epoch + 1) % ckpt_every_epochs == 0:
-            save_checkpoint(ckpt_dir / f"epoch_{epoch}.pth", model, optimizer, scheduler, epoch, global_step, cfg, epoch_complete=True)
+            save_checkpoint(ckpt_dir / f"{exp_name}_epoch_{epoch}.pth", model, optimizer, scheduler, epoch, global_step, cfg, epoch_complete=True)
 
-    save_checkpoint(ckpt_dir / "last.pth", model, optimizer, scheduler, num_epochs - 1, global_step, cfg, epoch_complete=True)
+    save_checkpoint(ckpt_dir / f"{exp_name}_last.pth", model, optimizer, scheduler, num_epochs - 1, global_step, cfg, epoch_complete=True)
     logger.close()
     print("training complete.")
 

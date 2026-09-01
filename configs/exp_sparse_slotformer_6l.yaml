@@ -1,0 +1,23 @@
+# Experiment 4/4: sparse 3D backbone + SlotFormer at 6 layers (NUM_CYCLES=2,
+# two full x/y/z passes) -- doubles SlotFormer depth vs. experiment 3 to
+# check whether the extra representational depth is worth its ~2x SlotFormer
+# compute cost (see README's benchmark_backbone.py numbers).
+#
+# python train.py --config configs/exp_sparse_slotformer_6l.yaml --ckpt_dir checkpoints_sparse_slotformer_6l
+BASE_CONFIG: default.yaml
+
+SLOTFORMER:
+  ENABLED: true
+  NUM_CYCLES: 2
+
+# Back on DATA.VOXEL_SIZE 0.2 (see default.yaml's comment -- 0.1 roughly
+# doubled training time for an unproven accuracy gain). Measured on RTX
+# 2070/Windows over 250 steps: batch=12 ~7.6GiB/93% (too tight), batch=8
+# ~7.4GiB/90% (still too tight -- 6L's memory doesn't drop much between 8 and
+# 12), batch=6 measured ~5.7GiB/69%, safely repeatable.
+# LR: sqrt-scaled (0.003 * sqrt(BATCH_SIZE/4)), same fallback as 3L -- 6L has
+# even more SlotFormer attention depth than 3L, so it's at least as likely to
+# be unstable at a linear-scaled LR.
+OPTIMIZATION:
+  BATCH_SIZE: 6
+  LR: 0.00367

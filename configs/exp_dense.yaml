@@ -1,0 +1,26 @@
+# Experiment 1/4: dense 3D backbone (nn.Conv3d over the full voxel grid, no
+# sparsity), no SlotFormer (a dense backbone already has a whole-grid
+# receptive field, so SlotFormer's job is redundant here -- see README's
+# "3D backbone: pure-PyTorch vs spconv" section for the benchmark backing
+# this). Everything else (VFE, head, assigner, loss) is unchanged from
+# configs/default.yaml.
+#
+# python train.py --config configs/exp_dense.yaml --ckpt_dir checkpoints_dense
+BASE_CONFIG: default.yaml
+
+BACKBONE:
+  TYPE: dense
+
+SLOTFORMER:
+  ENABLED: false
+
+# The dense backbone's first conv sees a full (batch, C, X, Y, Z) tensor at
+# stem resolution -- measured on RTX 2070 (8GB) at default.yaml's BATCH_SIZE
+# 64: OOM trying to allocate 63GiB. Empirically re-measured per batch size on
+# this same GPU/config: 2->4.06GiB (safe), 4->8.10GiB, 6->12.15GiB (4 and 6
+# only "succeed" via Windows' slow VRAM-to-system-RAM fallback, not real
+# headroom -- unsafe for a full run). LR re-scaled from the same 0.003
+# @ BATCH_SIZE=4 baseline default.yaml's comment already uses (0.003 * 2/4).
+OPTIMIZATION:
+  BATCH_SIZE: 2
+  LR: 0.0015

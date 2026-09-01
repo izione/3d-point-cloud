@@ -29,11 +29,17 @@ def build_index_grid(coords: torch.Tensor, batch_size: int, grid_size, device=No
 # kernel offsets into one gather+einsum (fewer, bigger GPU kernel launches --
 # helps when launch overhead dominates, i.e. on GPU); loop processes one
 # offset at a time (smaller peak memory, no k^3 blowup -- measured faster on
-# CPU, where there's no launch-overhead penalty to amortize away). Which one
-# wins on a given Colab GPU is not something to assume -- time both there
-# (toggle CONV_MODE below) before committing to a long run.
-CONV_MODE = "loop"  # "vectorized" or "loop" -- default "loop" because that's the one actually
-                     # measured faster so far (on CPU); try "vectorized" on the real Colab GPU
+# CPU, where there's no launch-overhead penalty to amortize away).
+CONV_MODE = "vectorized"  # "vectorized" or "loop" -- measured on a real GPU (RTX 2070, via
+                          # benchmark_backbone.py on the actual sonar dataset): "loop" took
+                          # ~1880ms/frame for this backbone, "vectorized" ~266ms/frame (7x) --
+                          # launch-overhead dominates on GPU as expected, so "vectorized" is now
+                          # the default. "loop" is still what's faster on CPU-only setups.
+                          # (SparseConv3dDown's output-coord candidate search had its own,
+                          # separate k^3 Python loop that CONV_MODE never touched -- vectorizing
+                          # that too, see SparseConv3dDown.forward below, took the same benchmark
+                          # down to ~44ms/frame, on par with an equivalent dense nn.Conv3d backbone
+                          # (~48ms/frame) despite <0.1% voxel occupancy.)
 
 
 def _sparse_conv_core(in_features, in_coords, in_index_grid, in_grid_size, out_coords,
@@ -153,32 +159,40 @@ class SparseConv3dDown(nn.Module):
         out_grid_size = self.output_grid_size(grid_size, self.k, self.stride, self.padding)
         device = features.device
         # candidate output coords: invert in_coord = out*stride + koff - padding for every
-        # active input voxel and every kernel offset, keep integer/in-range results.
-        cand = []
-        for kx in range(self.k):
-            for ky in range(self.k):
-                for kz in range(self.k):
-                    numer_x = coords[:, 1] - kx + self.padding
-                    numer_y = coords[:, 2] - ky + self.padding
-                    numer_z = coords[:, 3] - kz + self.padding
-                    div = (numer_x % self.stride == 0) & (numer_y % self.stride == 0) & (numer_z % self.stride == 0)
-                    if not div.any():
-                        continue
-                    ox = numer_x[div] // self.stride
-                    oy = numer_y[div] // self.stride
-                    oz = numer_z[div] // self.stride
-                    ob = coords[div, 0]
-                    in_range = (
-                        (ox >= 0) & (ox < out_grid_size[0]) &
-                        (oy >= 0) & (oy < out_grid_size[1]) &
-                        (oz >= 0) & (oz < out_grid_size[2])
-                    )
-                    if in_range.any():
-                        cand.append(torch.stack([ob[in_range], ox[in_range], oy[in_range], oz[in_range]], dim=1))
-        if len(cand) == 0:
+        # active input voxel and every kernel offset, keep integer/in-range results. Batches
+        # all k^3 offsets into one vectorized pass instead of a 27-iteration Python loop --
+        # on GPU that loop was k^3 sequential small launches *every* downsample stage, which
+        # (per benchmark_backbone.py against the real dataset on an RTX 2070) was a big chunk
+        # of why the sparse backbone was slower than an equivalent dense nn.Conv3d one despite
+        # <0.1% voxel occupancy; this arithmetic is cheap enough that batching it costs nothing
+        # extra on CPU either.
+        k = self.k
+        if coords.shape[0] == 0:
             out_coords = torch.zeros((0, 4), dtype=torch.long, device=device)
         else:
-            out_coords = torch.unique(torch.cat(cand, dim=0), dim=0)
+            ar = torch.arange(k, device=device)
+            offsets = torch.stack(torch.meshgrid(ar, ar, ar, indexing="ij"), dim=-1).reshape(-1, 3)  # (K,3)
+
+            numer_x = coords[None, :, 1] - offsets[:, 0:1] + self.padding  # (K,N)
+            numer_y = coords[None, :, 2] - offsets[:, 1:2] + self.padding
+            numer_z = coords[None, :, 3] - offsets[:, 2:3] + self.padding
+            div = (numer_x % self.stride == 0) & (numer_y % self.stride == 0) & (numer_z % self.stride == 0)
+
+            ox = numer_x // self.stride
+            oy = numer_y // self.stride
+            oz = numer_z // self.stride
+            ob = coords[None, :, 0].expand_as(ox)
+
+            in_range = (
+                (ox >= 0) & (ox < out_grid_size[0]) &
+                (oy >= 0) & (oy < out_grid_size[1]) &
+                (oz >= 0) & (oz < out_grid_size[2])
+            )
+            valid = (div & in_range).reshape(-1)
+
+            cand = torch.stack([ob, ox, oy, oz], dim=-1).reshape(-1, 4)[valid]
+            out_coords = torch.zeros((0, 4), dtype=torch.long, device=device) if cand.shape[0] == 0 \
+                else torch.unique(cand, dim=0)
 
         out_features = _sparse_conv_core(
             features, coords, index_grid, grid_size, out_coords,

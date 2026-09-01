@@ -1,9 +1,20 @@
-# No spconv / torch_scatter dependency on purpose: both need a matching CUDA build
-# and routinely fail to install cleanly on Colab. Everything sparse-related is
-# implemented with core PyTorch ops (scatter_reduce_, index_add_) instead, so
-# this runs anywhere torch runs -- including local CPU for testing.
+# No hard spconv / torch_scatter dependency: both need a matching CUDA build and
+# routinely fail to install cleanly on Colab. Everything sparse-related has a
+# fallback implemented with core PyTorch ops (scatter_reduce_, index_add_) instead,
+# so this runs anywhere torch runs -- including local CPU for testing -- with or
+# without spconv installed.
+#
+# spconv is OPTIONAL: if it's installed and models/backbone3d_auto.py's runtime
+# probe finds it actually works on this machine's GPU, the 3D backbone uses it
+# (a real hash-table-based sparse conv, much faster than the pure-PyTorch
+# fallback -- see README's benchmark_backbone.py section). If it's missing, fails
+# to import, or fails the probe (e.g. a CUDA/driver mismatch), the model silently
+# falls back to the pure-PyTorch backbone -- nothing here breaks either way.
+# Install it yourself, matching your CUDA version, e.g.:
+#   pip install spconv-cu126   # see https://github.com/traveller59/spconv for other cuXXX tags
 
 torch>=2.0
 pyyaml
 tqdm
 numpy
+matplotlib  # test.py --pr_curve_out and eval_pr_comparison.py

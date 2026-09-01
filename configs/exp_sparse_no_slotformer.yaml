@@ -1,0 +1,20 @@
+# Experiment 2/4: sparse 3D backbone (spconv if usable, else the pure-PyTorch
+# fallback -- see models/backbone3d_auto.py), SlotFormer disabled. Isolates
+# what the 3D backbone alone contributes vs. adding SlotFormer's long-range
+# attention on top (experiments 3 and 4).
+#
+# python train.py --config configs/exp_sparse_no_slotformer.yaml --ckpt_dir checkpoints_sparse_no_slotformer
+BASE_CONFIG: default.yaml
+
+SLOTFORMER:
+  ENABLED: false
+
+# Back on DATA.VOXEL_SIZE 0.2 (see default.yaml's comment -- 0.1 roughly
+# doubled training time for an unproven accuracy gain). Measured via train.py
+# itself (an isolated probe script under-measures real usage here --
+# NUM_WORKERS=10/persistent_workers/pin_memory push it higher) over 400+ real
+# steps: batch=8 plateaued cleanly at 5.96GiB/73%, real headroom.
+# LR linear-scaled from the project's 0.003 @ BATCH_SIZE=4 baseline.
+OPTIMIZATION:
+  BATCH_SIZE: 8
+  LR: 0.006

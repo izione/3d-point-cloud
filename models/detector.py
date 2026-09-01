@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 from .vfe import VFE
-from .stem import Stem
+from .backbone3d_auto import build_backbone3d
 from .slotformer import SlotFormerBackbone
 from .heads import DetectionHead
 from .assign import DynamicLabelAssigner
@@ -20,14 +20,25 @@ class DiverDetector(nn.Module):
         self.register_buffer("pc_range", torch.tensor(pc_range, dtype=torch.float32))
         self.register_buffer("voxel_size", torch.tensor(voxel_size, dtype=torch.float32))
         self.grid_size = tuple(round((pc_range[3 + i] - pc_range[i]) / voxel_size[i]) for i in range(3))
-        self.stem_stride = cfg["STEM"]["DOWNSAMPLE_STRIDE"]
 
         self.vfe = VFE(num_filters=cfg["VFE"]["NUM_FILTERS"])
-        s = cfg["STEM"]
-        self.stem = Stem(s["IN_CHANNELS"], s["OUT_CHANNELS"], s["NUM_BASIC_BLOCKS"], s["DOWNSAMPLE_KERNEL"], s["DOWNSAMPLE_STRIDE"])
         bcfg = cfg["BACKBONE"]
-        self.backbone = SlotFormerBackbone(bcfg["FEATURE_DIM"], bcfg["WIN_SIZE"], bcfg["NUM_CYCLES"], bcfg["NUM_HEADS"])
-        self.head = DetectionHead(bcfg["FEATURE_DIM"], cfg["DENSE_HEAD"])
+        self.backbone = build_backbone3d(
+            self.vfe.out_channels, bcfg["STAGE_CHANNELS"], bcfg["NUM_BLOCKS_PER_STAGE"],
+            bcfg["DOWNSAMPLE_KERNEL"], bcfg["DOWNSAMPLE_STRIDE"], bcfg.get("TYPE", "auto"),
+        )
+        # total downsample factor from all 4 backbone stages (x,y,z all strided every
+        # stage) -- kept as `stem_stride` since test.py/visualize*.py already read
+        # model.stem_stride to get the effective voxel size at the backbone's output.
+        self.stem_stride = self.backbone.total_stride
+        scfg = cfg["SLOTFORMER"]
+        # ENABLED lets an experiment skip SlotFormer entirely (e.g. the dense backbone
+        # already has a whole-grid receptive field, so SlotFormer's job is redundant
+        # there -- see README's backbone benchmark section).
+        self.use_slotformer = scfg.get("ENABLED", True)
+        if self.use_slotformer:
+            self.slot_backbone = SlotFormerBackbone(self.backbone.out_channels, scfg["WIN_SIZE"], scfg["NUM_CYCLES"], scfg["NUM_HEADS"])
+        self.head = DetectionHead(self.backbone.out_channels, cfg["DENSE_HEAD"])
         self.assigner = DynamicLabelAssigner(cfg["ASSIGNER"], self.pc_range, self.voxel_size * self.stem_stride)
 
     def _to_device(self, batch, device):
@@ -52,12 +63,12 @@ class DiverDetector(nn.Module):
         num_voxels = b["voxel_coords"].shape[0]
         vfe_out = self.vfe(b["points"], b["point_voxel_idx"], b["voxel_coords"], num_voxels, self.pc_range, self.voxel_size)
         index_grid = build_index_grid(b["voxel_coords"], b["batch_size"], self.grid_size, device=device)
-        stem_feat, stem_coords, stem_idx_grid, stem_grid_size = self.stem(
+        bb_feat, bb_coords, bb_idx_grid, bb_grid_size = self.backbone(
             vfe_out, b["voxel_coords"], index_grid, self.grid_size, b["batch_size"]
         )
-        bb_out = self.backbone(stem_feat, stem_coords)
-        pred = self.head(bb_out, stem_coords, stem_idx_grid, stem_grid_size)
-        return pred, stem_coords, b["gt_boxes"]
+        sf_feat = self.slot_backbone(bb_feat, bb_coords) if self.use_slotformer else bb_feat
+        pred = self.head(sf_feat, bb_coords, bb_idx_grid, bb_grid_size)
+        return pred, bb_coords, b["gt_boxes"]
 
     def loss(self, batch, device):
         pred, stem_coords, gt_boxes_list = self.forward(batch, device)

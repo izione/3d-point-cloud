@@ -106,6 +106,30 @@ python benchmark_backbone.py --data_root /path/to/dataset --num_frames 3000
 # add --skip_slotformer for backbone-only numbers, or --slotformer_cycles 1 2 3 to test more depths
 ```
 
+## Backbone registry -- adding new architectures to experiment with
+
+`BACKBONE.TYPE` in a config selects a backbone via a name -> builder
+registry (`models/backbone_registry.py`) instead of a hardcoded if/elif, so
+new architectures can be added as their own module without touching
+`detector.py` or any other backbone's file. Currently registered:
+
+| `BACKBONE.TYPE` | module | what it is |
+|---|---|---|
+| `auto` (default) | `backbone3d_auto.py` | encoder-only multi-stage sparse conv, spconv if usable else pure-PyTorch |
+| `dense` | `backbone3d_dense.py` | ordinary `nn.Conv3d` over the full voxel grid, no sparsity |
+| `sparse_unet` | `backbone3d_unet.py` | sparse encoder-decoder + skip connections (see its module docstring) -- restores full input resolution (`total_stride=1`) before SlotFormer/the head, instead of relying on SlotFormer's attention to make up for a coarser encoder-only output. `configs/exp_sparse_unet.yaml` is experiment 5 in the dense/sparse/SlotFormer-depth comparison, with `SLOTFORMER.ENABLED: false` -- it's specifically testing whether the U-Net's own (local but deep) receptive field is enough on its own. |
+
+To add another one: write an `nn.Module` matching the shared
+`forward(features, coords, index_grid, grid_size, batch_size) ->
+(features, coords, index_grid, grid_size)` interface (with `.out_channels`
+and `.total_stride` attributes), register a `(in_channels, bcfg) -> module`
+builder with `@register_backbone("your_name")`, and import that module from
+`models/__init__.py` (its registration decorator has to actually run before
+`build_backbone()` is called -- see that file's comment). `bcfg` is the
+whole `cfg["BACKBONE"]` dict, so a new backbone can read its own extra
+config keys (like `sparse_unet`'s `DECODER_BLOCKS_PER_STAGE`) without
+changing the registry or `detector.py` at all.
+
 ## Train
 
 ```bash

@@ -202,6 +202,100 @@ class SparseConv3dDown(nn.Module):
         return out_features, out_coords, out_index_grid, out_grid_size
 
 
+def _sparse_conv_core_transposed(child_features, child_index_grid, child_grid_size,
+                                  parent_coords, weight, bias, stride, padding):
+    """The transpose of SparseConv3dDown's forward: gathers from the coarser
+    ("child") sparse tensor into a caller-given ("parent") coordinate set,
+    using the exact same in_coord = out*stride + koff - padding relationship
+    SparseConv3dDown.forward already uses to derive its own output coords --
+    just run with parent_coords as the query/output side instead of being
+    solved for. Because parent_coords is supplied by the caller (typically
+    cached from the paired SparseConv3dDown call this is inverting) rather
+    than discovered by scanning for occupied neighbors, this is a *paired*
+    inverse, not a generative transposed conv: it never invents a coordinate
+    that wasn't in the given parent set, which is exactly what lets a U-Net
+    decoder's skip-connection merge be a plain index-aligned concat (see
+    SparseInverseConv3d below) instead of a coordinate-hash join.
+
+    weight: (k,k,k,out_ch,in_ch) where in_ch indexes child_features' channels
+    and out_ch indexes the channels this call produces for parent_coords."""
+    k = weight.shape[0]
+    device = child_features.device
+    Nout = parent_coords.shape[0]
+    Cout, Cin = weight.shape[-2], weight.shape[-1]
+    if Nout == 0:
+        return torch.zeros(0, Cout, device=device, dtype=child_features.dtype)
+
+    ar = torch.arange(k, device=device)
+    offsets = torch.stack(torch.meshgrid(ar, ar, ar, indexing="ij"), dim=-1).reshape(-1, 3)  # (K,3)
+    K = offsets.shape[0]
+    X, Y, Z = child_grid_size
+
+    # Same numer_*/stride relationship SparseConv3dDown.forward uses to go
+    # parent_coord -> candidate child_coord; here parent_coords is given (the
+    # coords we must produce output for) and we gather whichever child
+    # coords it resolves to, instead of collecting them into a new coord set.
+    numer_x = parent_coords[None, :, 1] - offsets[:, 0:1] + padding  # (K,Nout)
+    numer_y = parent_coords[None, :, 2] - offsets[:, 1:2] + padding
+    numer_z = parent_coords[None, :, 3] - offsets[:, 2:3] + padding
+    ib = parent_coords[None, :, 0].expand(K, Nout)
+
+    div = (numer_x % stride == 0) & (numer_y % stride == 0) & (numer_z % stride == 0)
+    cx, cy, cz = numer_x // stride, numer_y // stride, numer_z // stride
+    in_bounds = (cx >= 0) & (cx < X) & (cy >= 0) & (cy < Y) & (cz >= 0) & (cz < Z)
+    valid = div & in_bounds
+
+    row_idx = child_index_grid[ib, cx.clamp(0, X - 1), cy.clamp(0, Y - 1), cz.clamp(0, Z - 1)]
+    valid = valid & (row_idx >= 0)
+    safe_row_idx = row_idx.clamp(min=0)
+
+    gathered = child_features[safe_row_idx.reshape(-1)].reshape(K, Nout, Cin)
+    gathered = gathered * valid.unsqueeze(-1).to(gathered.dtype)
+
+    w = weight.reshape(K, Cout, Cin)
+    out = torch.einsum("kod,knd->no", w, gathered)
+    if bias is not None:
+        out = out + bias
+    return out
+
+
+class SparseInverseConv3d(nn.Module):
+    """Paired inverse of SparseConv3dDown -- deliberately NOT a generative
+    transposed conv (the kind that grows the active set outward from
+    scratch, like MinkowskiEngine's generative ConvolutionTranspose). This
+    layer only ever writes to the exact `parent_coords` the caller passes
+    in -- normally the coords cached from the matching SparseConv3dDown call
+    it's inverting, before that call ran. Same (kernel_size, stride, padding)
+    as that call is required for the coordinate arithmetic to invert
+    correctly.
+
+    This is what makes a sparse U-Net's skip connection a plain
+    index-aligned concat: this layer's output rows are in exactly
+    `parent_coords`' order, the same coords the encoder's cached skip
+    features are indexed by, so `torch.cat([up_feat, skip_feat], dim=1)`
+    lines up row-for-row with no coordinate-hash matching needed."""
+
+    def __init__(self, in_channels, out_channels, kernel_size=3, bias=True):
+        super().__init__()
+        k = kernel_size
+        self.weight = nn.Parameter(torch.empty(k, k, k, out_channels, in_channels))
+        nn.init.kaiming_uniform_(self.weight.reshape(-1, in_channels), a=5 ** 0.5)
+        self.bias = nn.Parameter(torch.zeros(out_channels)) if bias else None
+        self.k = k
+
+    def forward(self, features, coords, index_grid, grid_size,
+                parent_coords, parent_index_grid, parent_grid_size, stride, padding):
+        # `coords` (this layer's own/child coords) isn't needed by the gather
+        # itself (child_index_grid + child_grid_size are enough to look features
+        # up), but is kept in the signature for symmetry with every other
+        # sparse_ops layer's forward(features, coords, index_grid, grid_size, ...).
+        out = _sparse_conv_core_transposed(
+            features, index_grid, grid_size, parent_coords,
+            self.weight, self.bias, stride=stride, padding=padding,
+        )
+        return out, parent_coords, parent_index_grid  # active set becomes the parent's, unchanged henceforth
+
+
 class SparseBasicBlock(nn.Module):
     """Two SubMConv3d + BN + ReLU with a residual connection (ResNet-style)."""
 

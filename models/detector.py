@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 
 from .vfe import VFE
-from .backbone3d_auto import build_backbone3d
+from .backbone_registry import build_backbone
 from .slotformer import SlotFormerBackbone
 from .heads import DetectionHead
 from .assign import DynamicLabelAssigner
@@ -23,10 +23,7 @@ class DiverDetector(nn.Module):
 
         self.vfe = VFE(num_filters=cfg["VFE"]["NUM_FILTERS"])
         bcfg = cfg["BACKBONE"]
-        self.backbone = build_backbone3d(
-            self.vfe.out_channels, bcfg["STAGE_CHANNELS"], bcfg["NUM_BLOCKS_PER_STAGE"],
-            bcfg["DOWNSAMPLE_KERNEL"], bcfg["DOWNSAMPLE_STRIDE"], bcfg.get("TYPE", "auto"),
-        )
+        self.backbone = build_backbone(self.vfe.out_channels, bcfg)
         # total downsample factor from all 4 backbone stages (x,y,z all strided every
         # stage) -- kept as `stem_stride` since test.py/visualize*.py already read
         # model.stem_stride to get the effective voxel size at the backbone's output.

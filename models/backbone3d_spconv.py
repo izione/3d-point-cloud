@@ -9,7 +9,8 @@ spconv is CUDA-only and not guaranteed to import or build cleanly everywhere
 (Colab especially) -- see models/backbone3d_auto.py, which probes this module
 at import time and silently falls back to the pure-PyTorch
 backbone3d.Sparse3DBackbone if spconv isn't usable. Nothing here should be
-imported directly by detector.py; go through backbone3d_auto.build_backbone3d.
+imported directly by detector.py; go through models.backbone_registry.build_backbone
+(BACKBONE.TYPE: auto), which dispatches to backbone3d_auto.build_auto_backbone.
 """
 import torch
 import torch.nn as nn

@@ -1,0 +1,39 @@
+# Experiment: mirror the common "ResNet encoder + light U-Net decoder" pattern
+# (segmentation_models_pytorch-style) -- heavy per-stage refinement (SlotFormer(3L)
+# here, instead of ResNet Bottleneck blocks) in the ENCODER only; the decoder is kept
+# light -- up-conv + skip concat + ONE fuse conv, no residual blocks, no SlotFormer.
+# See models/backbone3d_slot_light_unet.py's module docstring for how this differs
+# from the other three SlotFormer-backbone experiments already in this repo.
+#
+# Always fully restores resolution (encoder depth == decoder depth, like
+# exp_sparse_slot_unet.yaml -- no UPSAMPLE_STAGES knob here).
+#
+# python train.py --config configs/exp_sparse_slot_light_unet.yaml --ckpt_dir checkpoints_sparse_slot_light_unet
+BASE_CONFIG: default.yaml
+
+BACKBONE:
+  TYPE: sparse_slot_light_unet
+  STAGE_CHANNELS: [64, 96, 128, 128]   # same 4-stage width progression as the other SlotFormer-backbone
+                                        # experiments, for fair comparison
+  NUM_BLOCKS_PER_STAGE: 0               # unused (no residual blocks anywhere) -- kept only because
+                                         # config_utils/detector.py require the key to exist
+  DOWNSAMPLE_KERNEL: 3
+  DOWNSAMPLE_STRIDE: 2
+  SLOTFORMER_WIN_SIZE: 12
+  SLOTFORMER_NUM_CYCLES: 1              # 3L per ENCODER stage only (4 stages x 3L = 12 SlotFormer
+                                         # layers total, half of exp_sparse_slot_unet.yaml's 24 --
+                                         # decoder has none)
+  SLOTFORMER_NUM_HEADS: 4
+
+SLOTFORMER:
+  ENABLED: false   # SlotFormer runs INSIDE every encoder stage here (BACKBONE.SLOTFORMER_* above) --
+                    # must stay false here or detector.py attaches yet another, redundant one.
+
+# NOT measured on real hardware yet. Re-measure via train.py before trusting BATCH_SIZE/LR/epoch
+# time -- expected to be cheaper than exp_sparse_slot_unet.yaml (no decoder-side SlotFormer) but
+# still has SlotFormer at the encoder's shallow, high-voxel-count stages.
+OPTIMIZATION:
+  BATCH_SIZE: 8
+  LR: 0.00424   # sqrt-scaled (0.003 * sqrt(8/4)) pre-emptively, same reasoning as the other
+                # SlotFormer-backbone configs.
+  NUM_EPOCHS: 20

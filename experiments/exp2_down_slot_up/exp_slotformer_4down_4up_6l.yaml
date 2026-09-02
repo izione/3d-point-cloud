@@ -1,0 +1,40 @@
+# Experiment 2 (backbone-architecture comparison series): 4-stage downsample sparse
+# encoder -> SlotFormer(6L, at the bottleneck) -> 4-stage upsample decoder (fully
+# restores resolution). See models/backbone3d_down_slot_up.py's module docstring.
+#
+# One of 6 siblings in this folder varying two axes:
+#   SlotFormer depth (3L=NUM_CYCLES:1 / 6L=NUM_CYCLES:2) x UPSAMPLE_STAGES (2/3/4)
+# This file: 6L x up=4 (fully restored).
+#
+# UPSAMPLE_STAGES=3 (not 4) was measured on real hardware in the actively-running
+# configs/exp_sparse_down4_slot_up.yaml at the time this series was split out:
+# batch=8 plateaued ~6.99/8 GiB (85%), ~2.2s/it, ~2h/epoch. up=4 (one more decoder
+# stage, touching even more active voxels at an even shallower resolution) is NOT
+# yet measured -- likely needs a smaller batch size to avoid OOM.
+#
+# python train.py --config experiments/exp2_down_slot_up/exp_slotformer_4down_4up_6l.yaml --ckpt_dir checkpoints_exp2_4down_4up_6l
+BASE_CONFIG: ../../configs/default.yaml
+
+BACKBONE:
+  TYPE: sparse_down_slot_up
+  STAGE_CHANNELS: [64, 96, 128, 128]
+  NUM_BLOCKS_PER_STAGE: 2
+  DOWNSAMPLE_KERNEL: 3
+  DOWNSAMPLE_STRIDE: 2
+  UPSAMPLE_STAGES: 4
+  DECODER_BLOCKS_PER_STAGE: 2
+  SLOTFORMER_WIN_SIZE: 12
+  SLOTFORMER_NUM_CYCLES: 2   # 6L
+  SLOTFORMER_NUM_HEADS: 4
+
+SLOTFORMER:
+  ENABLED: false   # SlotFormer runs INSIDE this backbone (BACKBONE.SLOTFORMER_* above) --
+                    # must stay false here or detector.py attaches a second, redundant one.
+
+# NOT measured on real hardware yet at UPSAMPLE_STAGES=4. Placeholder values carried
+# over from the up=3 sibling run -- re-measure via train.py (real process, 250+ steps,
+# max_memory_reserved, watch for allocator creep) before trusting these.
+OPTIMIZATION:
+  BATCH_SIZE: 8
+  LR: 0.00424   # sqrt-scaled (0.003 * sqrt(8/4)) pre-emptively -- SlotFormer present.
+  NUM_EPOCHS: 20

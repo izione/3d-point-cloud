@@ -43,14 +43,14 @@ CONV_MODE = "vectorized"  # "vectorized" or "loop" -- measured on a real GPU (RT
 
 
 def _sparse_conv_core(in_features, in_coords, in_index_grid, in_grid_size, out_coords,
-                       weight, bias, stride, padding):
+                       weight, bias, stride, padding, dilation=1):
     if CONV_MODE == "loop":
-        return _sparse_conv_core_loop(in_features, in_coords, in_index_grid, in_grid_size, out_coords, weight, bias, stride, padding)
-    return _sparse_conv_core_vectorized(in_features, in_coords, in_index_grid, in_grid_size, out_coords, weight, bias, stride, padding)
+        return _sparse_conv_core_loop(in_features, in_coords, in_index_grid, in_grid_size, out_coords, weight, bias, stride, padding, dilation)
+    return _sparse_conv_core_vectorized(in_features, in_coords, in_index_grid, in_grid_size, out_coords, weight, bias, stride, padding, dilation)
 
 
 def _sparse_conv_core_loop(in_features, in_coords, in_index_grid, in_grid_size, out_coords,
-                            weight, bias, stride, padding):
+                            weight, bias, stride, padding, dilation=1):
     k = weight.shape[0]
     Nout = out_coords.shape[0]
     Cout = weight.shape[-2]
@@ -59,9 +59,9 @@ def _sparse_conv_core_loop(in_features, in_coords, in_index_grid, in_grid_size, 
     for kx in range(k):
         for ky in range(k):
             for kz in range(k):
-                ix = out_coords[:, 1] * stride + kx - padding
-                iy = out_coords[:, 2] * stride + ky - padding
-                iz = out_coords[:, 3] * stride + kz - padding
+                ix = out_coords[:, 1] * stride + kx * dilation - padding
+                iy = out_coords[:, 2] * stride + ky * dilation - padding
+                iz = out_coords[:, 3] * stride + kz * dilation - padding
                 in_bounds = (ix >= 0) & (ix < X) & (iy >= 0) & (iy < Y) & (iz >= 0) & (iz < Z)
                 if not in_bounds.any():
                     continue
@@ -81,7 +81,7 @@ def _sparse_conv_core_loop(in_features, in_coords, in_index_grid, in_grid_size, 
 
 
 def _sparse_conv_core_vectorized(in_features, in_coords, in_index_grid, in_grid_size, out_coords,
-                                  weight, bias, stride, padding):
+                                  weight, bias, stride, padding, dilation=1):
     """Vectorized over all k^3 kernel offsets at once (one gather + one einsum)
     instead of a Python loop -- far fewer, larger GPU kernel launches, which
     matters a lot more than raw FLOPs here since every offset's per-op cost
@@ -94,7 +94,7 @@ def _sparse_conv_core_vectorized(in_features, in_coords, in_index_grid, in_grid_
         return torch.zeros(0, Cout, device=device, dtype=in_features.dtype)
 
     ar = torch.arange(k, device=device)
-    offsets = torch.stack(torch.meshgrid(ar, ar, ar, indexing="ij"), dim=-1).reshape(-1, 3)  # (K,3)
+    offsets = torch.stack(torch.meshgrid(ar, ar, ar, indexing="ij"), dim=-1).reshape(-1, 3) * dilation  # (K,3)
     K = offsets.shape[0]
     X, Y, Z = in_grid_size
 
@@ -119,21 +119,29 @@ def _sparse_conv_core_vectorized(in_features, in_coords, in_index_grid, in_grid_
 
 
 class SubMConv3d(nn.Module):
-    """Submanifold conv: output lives on the exact same active coords as input."""
+    """Submanifold conv: output lives on the exact same active coords as input.
 
-    def __init__(self, in_channels, out_channels, kernel_size=3, bias=True):
+    dilation>1 spaces the k^3 taps `dilation` voxels apart (padding grows to
+    dilation*(k//2) to keep the active set exactly unchanged, same as dilation=1) --
+    grows receptive field without adding a downsample stage, so it doesn't touch
+    effective resolution (VOXEL_SIZE * backbone stride) the way a deeper/more-strided
+    backbone would. See models/backbone3d.py's module docstring for why effective
+    resolution is the thing that actually broke precision/recall before."""
+
+    def __init__(self, in_channels, out_channels, kernel_size=3, bias=True, dilation=1):
         super().__init__()
         k = kernel_size
         self.weight = nn.Parameter(torch.empty(k, k, k, out_channels, in_channels))
         nn.init.kaiming_uniform_(self.weight.reshape(-1, in_channels), a=5 ** 0.5)
         self.bias = nn.Parameter(torch.zeros(out_channels)) if bias else None
         self.k = k
-        self.padding = k // 2
+        self.dilation = dilation
+        self.padding = dilation * (k // 2)
 
     def forward(self, features, coords, index_grid, grid_size):
         out = _sparse_conv_core(
             features, coords, index_grid, grid_size, coords,
-            self.weight, self.bias, stride=1, padding=self.padding,
+            self.weight, self.bias, stride=1, padding=self.padding, dilation=self.dilation,
         )
         return out, coords, index_grid  # active set unchanged
 
@@ -202,15 +210,113 @@ class SparseConv3dDown(nn.Module):
         return out_features, out_coords, out_index_grid, out_grid_size
 
 
-class SparseBasicBlock(nn.Module):
-    """Two SubMConv3d + BN + ReLU with a residual connection (ResNet-style)."""
+def _sparse_conv_core_transposed(child_features, child_index_grid, child_grid_size,
+                                  parent_coords, weight, bias, stride, padding):
+    """The transpose of SparseConv3dDown's forward: gathers from the coarser
+    ("child") sparse tensor into a caller-given ("parent") coordinate set, using
+    the exact same in_coord = out*stride + koff - padding relationship
+    SparseConv3dDown.forward already uses to derive its own output coords -- just
+    run with parent_coords as the query/output side instead of being solved for.
+    Because parent_coords is supplied by the caller (typically cached from the
+    paired SparseConv3dDown call this is inverting) rather than discovered by
+    scanning for occupied neighbors, this is a *paired* inverse, not a generative
+    transposed conv: it never invents a coordinate that wasn't in the given
+    parent set -- which is what lets a skip-connection merge be a plain
+    index-aligned concat (see SparseInverseConv3d below) instead of a
+    coordinate-hash join. Ported from the `unet` branch's sparse_ops.py.
 
-    def __init__(self, channels, kernel_size=3):
+    weight: (k,k,k,out_ch,in_ch) where in_ch indexes child_features' channels
+    and out_ch indexes the channels this call produces for parent_coords."""
+    k = weight.shape[0]
+    device = child_features.device
+    Nout = parent_coords.shape[0]
+    Cout, Cin = weight.shape[-2], weight.shape[-1]
+    if Nout == 0:
+        return torch.zeros(0, Cout, device=device, dtype=child_features.dtype)
+
+    ar = torch.arange(k, device=device)
+    offsets = torch.stack(torch.meshgrid(ar, ar, ar, indexing="ij"), dim=-1).reshape(-1, 3)  # (K,3)
+    K = offsets.shape[0]
+    X, Y, Z = child_grid_size
+
+    numer_x = parent_coords[None, :, 1] - offsets[:, 0:1] + padding  # (K,Nout)
+    numer_y = parent_coords[None, :, 2] - offsets[:, 1:2] + padding
+    numer_z = parent_coords[None, :, 3] - offsets[:, 2:3] + padding
+    ib = parent_coords[None, :, 0].expand(K, Nout)
+
+    div = (numer_x % stride == 0) & (numer_y % stride == 0) & (numer_z % stride == 0)
+    cx, cy, cz = numer_x // stride, numer_y // stride, numer_z // stride
+    in_bounds = (cx >= 0) & (cx < X) & (cy >= 0) & (cy < Y) & (cz >= 0) & (cz < Z)
+    valid = div & in_bounds
+
+    row_idx = child_index_grid[ib, cx.clamp(0, X - 1), cy.clamp(0, Y - 1), cz.clamp(0, Z - 1)]
+    valid = valid & (row_idx >= 0)
+    safe_row_idx = row_idx.clamp(min=0)
+
+    gathered = child_features[safe_row_idx.reshape(-1)].reshape(K, Nout, Cin)
+    gathered = gathered * valid.unsqueeze(-1).to(gathered.dtype)
+
+    w = weight.reshape(K, Cout, Cin)
+    out = torch.einsum("kod,knd->no", w, gathered)
+    if bias is not None:
+        out = out + bias
+    return out
+
+
+class SparseInverseConv3d(nn.Module):
+    """Paired inverse of SparseConv3dDown -- deliberately NOT a generative
+    transposed conv (the kind that grows the active set outward from scratch,
+    like MinkowskiEngine's generative ConvolutionTranspose). This layer only
+    ever writes to the exact `parent_coords` the caller passes in -- normally
+    the coords cached from the matching SparseConv3dDown call it's inverting.
+    Same (kernel_size, stride, padding) as that call is required for the
+    coordinate arithmetic to invert correctly. Ported from the `unet` branch's
+    sparse_ops.py (backbone3d_down_slot_up.py's decoder stage uses this)."""
+
+    def __init__(self, in_channels, out_channels, kernel_size=3, bias=True):
         super().__init__()
-        self.conv1 = SubMConv3d(channels, channels, kernel_size, bias=False)
-        self.bn1 = nn.BatchNorm1d(channels)
-        self.conv2 = SubMConv3d(channels, channels, kernel_size, bias=False)
-        self.bn2 = nn.BatchNorm1d(channels)
+        k = kernel_size
+        self.weight = nn.Parameter(torch.empty(k, k, k, out_channels, in_channels))
+        nn.init.kaiming_uniform_(self.weight.reshape(-1, in_channels), a=5 ** 0.5)
+        self.bias = nn.Parameter(torch.zeros(out_channels)) if bias else None
+        self.k = k
+
+    def forward(self, features, coords, index_grid, grid_size,
+                parent_coords, parent_index_grid, parent_grid_size, stride, padding):
+        out = _sparse_conv_core_transposed(
+            features, index_grid, grid_size, parent_coords,
+            self.weight, self.bias, stride=stride, padding=padding,
+        )
+        return out, parent_coords, parent_index_grid  # active set becomes the parent's, unchanged henceforth
+
+
+def make_norm1d(norm_type, channels, group_size=8):
+    """"batch" (default, unchanged behavior) or "group" -- GroupNorm's statistics
+    are computed per-sample (independent of how many active voxels other samples
+    in the batch happen to have), unlike BatchNorm1d which pools statistics over
+    ALL active voxels across the whole batch. At small batch sizes (this project's
+    sparse configs run batch=2-8 on an 8GB card) with active-voxel counts that swing
+    widely frame to frame (n_pos/voxel counts observed jumping several-fold between
+    steps), BatchNorm's per-step statistics can be noisy -- GroupNorm is the standard
+    fix point-cloud/sparse-conv work (e.g. VoxelNeXt, SECOND-family) reaches for here.
+    group_size=8 channels/group is a common default; channels must be divisible by it."""
+    if norm_type == "group":
+        assert channels % group_size == 0, f"channels={channels} not divisible by group_size={group_size}"
+        return nn.GroupNorm(channels // group_size, channels)
+    if norm_type == "batch":
+        return nn.BatchNorm1d(channels)
+    raise ValueError(f"unknown norm_type: {norm_type!r} (expected 'batch' or 'group')")
+
+
+class SparseBasicBlock(nn.Module):
+    """Two SubMConv3d + norm + ReLU with a residual connection (ResNet-style)."""
+
+    def __init__(self, channels, kernel_size=3, dilation=1, norm_type="batch"):
+        super().__init__()
+        self.conv1 = SubMConv3d(channels, channels, kernel_size, bias=False, dilation=dilation)
+        self.bn1 = make_norm1d(norm_type, channels)
+        self.conv2 = SubMConv3d(channels, channels, kernel_size, bias=False, dilation=dilation)
+        self.bn2 = make_norm1d(norm_type, channels)
         self.relu = nn.ReLU(inplace=True)
 
     def forward(self, features, coords, index_grid, grid_size):

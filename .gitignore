@@ -3,4 +3,6 @@ __pycache__/
 checkpoints/
 checkpoints_smoke/
 checkpoints_*/
+logs/
+*.log
 .venv/

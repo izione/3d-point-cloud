@@ -1,0 +1,37 @@
+# Experiment 3 (backbone-architecture comparison series): full encoder-decoder
+# ("unet") structure, 3 stages, residual blocks replaced by SlotFormer(3L) in EVERY
+# stage (encoder AND decoder). See models/backbone3d_slot_unet.py's module docstring.
+#
+# One of 3 siblings in this folder varying STAGE_CHANNELS depth (2/3/4 layers) --
+# this file fixes 3 layers, truncating exp_unet_slotformer_4layer.yaml's progression
+# (drops the redundant trailing 128) so all three siblings end at the same head
+# input width (128), isolating depth as the only difference between them.
+#
+# Always fully restores resolution (encoder depth == decoder depth by construction).
+#
+# python train.py --config experiments/exp3_unet_slotformer/exp_unet_slotformer_3layer.yaml --ckpt_dir checkpoints_exp3_unet_3layer
+BASE_CONFIG: ../../configs/default.yaml
+
+BACKBONE:
+  TYPE: sparse_slot_unet
+  STAGE_CHANNELS: [64, 96, 128]   # 3 layers -- this experiment's fixed axis value
+  NUM_BLOCKS_PER_STAGE: 0          # unused (no residual blocks anywhere in this backbone) --
+                                    # kept only because config_utils/detector.py require the key
+  DOWNSAMPLE_KERNEL: 3
+  DOWNSAMPLE_STRIDE: 2
+  SLOTFORMER_WIN_SIZE: 12
+  SLOTFORMER_NUM_CYCLES: 1        # 3L per stage, both encoder and decoder
+  SLOTFORMER_NUM_HEADS: 4
+
+SLOTFORMER:
+  ENABLED: false   # SlotFormer runs INSIDE every encoder/decoder stage here (BACKBONE.SLOTFORMER_*
+                    # above) -- must stay false here or detector.py attaches yet another one.
+
+# NOT measured on real hardware yet -- should be cheaper than the 4-layer sibling
+# (one fewer encoder+decoder stage pair of SlotFormer calls: 3x2=6 vs 4x2=8 stage-level
+# SlotFormer instances, though the shallowest remaining stage still sees the most
+# active voxels either way). Re-measure via train.py before trusting these.
+OPTIMIZATION:
+  BATCH_SIZE: 8
+  LR: 0.00424   # sqrt-scaled (0.003 * sqrt(8/4)) pre-emptively.
+  NUM_EPOCHS: 20

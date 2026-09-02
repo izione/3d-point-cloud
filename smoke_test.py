@@ -22,7 +22,7 @@ import torch
 from config_utils import load_config
 from models.detector import DiverDetector
 
-DEFAULT_CONFIGS = sorted(glob.glob("configs/exp_*.yaml"))
+DEFAULT_CONFIGS = sorted(glob.glob("configs/exp_*.yaml") + glob.glob("experiments/*/*.yaml"))
 
 
 def make_synthetic_batch(cfg, batch_size=2, points_per_sample=2000, num_gt_per_sample=3, device="cpu"):

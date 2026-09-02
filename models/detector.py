@@ -26,6 +26,7 @@ class DiverDetector(nn.Module):
         self.backbone = build_backbone3d(
             self.vfe.out_channels, bcfg["STAGE_CHANNELS"], bcfg["NUM_BLOCKS_PER_STAGE"],
             bcfg["DOWNSAMPLE_KERNEL"], bcfg["DOWNSAMPLE_STRIDE"], bcfg.get("TYPE", "auto"),
+            block_dilations=bcfg.get("BLOCK_DILATIONS"), norm_type=bcfg.get("NORM_TYPE", "batch"), bcfg=bcfg,
         )
         # total downsample factor from all 4 backbone stages (x,y,z all strided every
         # stage) -- kept as `stem_stride` since test.py/visualize*.py already read

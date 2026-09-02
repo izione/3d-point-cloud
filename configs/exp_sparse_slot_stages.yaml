@@ -1,0 +1,42 @@
+# Experiment: replace residual-block receptive-field growth with SlotFormer AT EVERY
+# encoder stage (between each downsample), instead of stacking SparseBasicBlocks.
+# See models/backbone3d_slot_stages.py's module docstring for the full rationale --
+# short version: growing receptive field via more residual blocks is expensive in 3D
+# sparse conv specifically (k^3 taps + per-call gather/launch overhead dominates cost,
+# not FLOPs), and SlotFormer already solves the "cheap global receptive field" problem,
+# so this tests using it as the ONLY per-stage refinement instead of adding it on top.
+#
+# Open question this tests: SlotFormer's cost scales with active voxel count, and the
+# SHALLOW stages have far more active voxels than backbone3d_down_slot_up.py's
+# bottleneck-only SlotFormer ever sees -- this could end up MORE expensive, not less.
+# Measure before assuming it's a win.
+#
+# python train.py --config configs/exp_sparse_slot_stages.yaml --ckpt_dir checkpoints_sparse_slot_stages
+BASE_CONFIG: default.yaml
+
+BACKBONE:
+  TYPE: sparse_slot_stages
+  STAGE_CHANNELS: [64, 96, 128, 128]   # same 4-stage width progression as exp_sparse_down4_slot_up.yaml,
+                                        # for a fair comparison between the two ways of using SlotFormer
+  NUM_BLOCKS_PER_STAGE: 0               # unused by this backbone (no residual blocks at all) -- kept only
+                                         # because config_utils/detector.py require the key to exist
+  DOWNSAMPLE_KERNEL: 3
+  DOWNSAMPLE_STRIDE: 2
+  SLOTFORMER_WIN_SIZE: 12
+  SLOTFORMER_NUM_CYCLES: 1              # 3L per stage -- start cheap (4 stages x 3L = 12 SlotFormer layers
+                                         # total already); bump to 2 (6L) only after confirming cost is sane,
+                                         # since this runs at EVERY stage including the highest-voxel-count ones
+  SLOTFORMER_NUM_HEADS: 4
+
+SLOTFORMER:
+  ENABLED: false   # SlotFormer runs INSIDE every backbone stage here (BACKBONE.SLOTFORMER_* above) --
+                    # must stay false here or detector.py attaches yet another, redundant one.
+
+# NOT measured on real hardware yet. Re-measure via train.py (real process, 250+ steps,
+# max_memory_reserved, watch for allocator creep) before trusting BATCH_SIZE/LR/epoch time.
+OPTIMIZATION:
+  BATCH_SIZE: 8
+  LR: 0.00424   # sqrt-scaled (0.003 * sqrt(8/4)) pre-emptively, same reasoning as
+                # exp_sparse_down4_slot_up.yaml -- SlotFormer is present, so use the
+                # LR scaling that's known not to diverge rather than the linear default.
+  NUM_EPOCHS: 20

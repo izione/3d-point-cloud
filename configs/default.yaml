@@ -16,20 +16,25 @@ DATA:
                                  # sizes needed -> more steps/epoch) for an unproven accuracy gain -- back
                                  # to 0.2 for now. Revisit 0.1 later once 0.2 has a real baseline result.
   POINT_CLOUD_RANGE: [0.0, -11.4, -5.6, 16.2, 11.4, 5.6]   # xmin,ymin,zmin,xmax,ymax,zmax
-  # TEST is a genuine held-out scene split over all 4 persons (Person3/4 relabeled
-  # for quality and re-included; previously excluded for inconsistent rotation
-  # labels) -- no frame from these scenes ever appears in train/val. Person2/
-  # scene_0078 stays pinned here since it was already TEST before this split
-  # existed; the other two were a seed-42 random pick.
-  #
-  # All previously-excluded Person2 scenes are now relabeled and back in
-  # TRAINVAL_SCENES: scene_0050/scene_0091 (2026-08-30), scene_0079 (2026-08-31).
+  # TEST is a genuine held-out scene split over all 4 persons -- no frame from
+  # these scenes ever appears in train/val. Replaced 2026-09-01 with an
+  # explicit 8-scene set (was the 3-scene scene_0078/0067/0019 set); scene_0067
+  # carries over, scene_0078/scene_0019 moved back into TRAINVAL_SCENES below.
+  # scene_0077/scene_0088/scene_0093 needed their raw sonar/camera data copied
+  # from uScenes/ into dataset/Person4/ first (they had annotations already
+  # but no Person-assigned data folder -- see apply_new_annotations.py's
+  # SCENE_TO_PERSON, updated same day) before they could be used at all.
   TEST_SCENES:
-    - "Person2/scene_0078"
+    - "Person2/scene_0035"
+    - "Person3/scene_0043"
+    - "Person4/scene_0055"
     - "Person3/scene_0067"
-    - "Person3/scene_0019"
+    - "Person4/scene_0077"
+    - "Person4/scene_0088"
+    - "Person2/scene_0089"
+    - "Person4/scene_0093"
   # TRAIN and VAL are instead a frame-level random split of this pool (see
-  # SonarDiverDataset): every one of these 29 scenes contributes frames to BOTH
+  # SonarDiverDataset): every one of these 28 scenes contributes frames to BOTH
   # train and val, so val loss tracks "how well is training going" across the
   # full pose/scene diversity, rather than generalization to a couple of unseen
   # scenes (that's what TEST measures).
@@ -37,14 +42,13 @@ DATA:
     - "Person2/scene_0050"
     - "Person2/scene_0091"
     - "Person2/scene_0079"
+    - "Person2/scene_0078"
+    - "Person3/scene_0019"
     - "Person1/scene_0068"
     - "Person1/scene_0063"
-    - "Person2/scene_0089"
     - "Person3/scene_0022"
-    - "Person4/scene_0055"
     - "Person4/scene_0090"
     - "Person3/scene_0080"
-    - "Person3/scene_0043"
     - "Person4/scene_0074"
     - "Person1/scene_0036"
     - "Person3/scene_0064"
@@ -55,7 +59,6 @@ DATA:
     - "Person1/scene_0049"
     - "Person4/scene_0021"
     - "Person2/scene_0009"
-    - "Person2/scene_0035"
     - "Person3/scene_0082"
     - "Person1/scene_0000"
     - "Person1/scene_0044"
@@ -63,6 +66,7 @@ DATA:
     - "Person2/scene_0076"
     - "Person3/scene_0092"
     - "Person4/scene_0065"
+    - "Person4/scene_0081"
   VAL_FRAME_RATIO: 0.1          # actually read (data/dataset.py) -- fraction of TRAINVAL_SCENES' pooled frames held out for val
   SPLIT_SEED: 42                # actually read (data/dataset.py) -- shuffle seed for the train/val frame split
   AUGMENTATION: false          # [not read by code] no augmentation is implemented at all -- nothing to toggle

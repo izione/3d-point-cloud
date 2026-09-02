@@ -1,0 +1,45 @@
+# Experiment 3 (backbone-architecture comparison series): full encoder-decoder
+# ("unet") structure, 4 stages, with residual blocks replaced by SlotFormer(3L) in
+# EVERY stage -- both encoder AND decoder. See models/backbone3d_slot_unet.py's
+# module docstring for the full design.
+#
+# This experiment's axis to vary across sibling files: STAGE_CHANNELS depth (this
+# file fixes 4 layers -- a sibling exp_unet_slotformer_Nlayer.yaml can shorten/
+# lengthen the list, e.g. [64,128] for 2 layers or [64,96,128,128,128] for 5, to see
+# how depth trades off against cost/accuracy for this always-fully-restoring design).
+#
+# Always fully restores resolution (no UPSAMPLE_STAGES knob -- encoder depth ==
+# decoder depth by construction, unlike experiments/exp2_down_slot_up/).
+#
+# Cost warning: SlotFormer runs at every encoder AND decoder stage, including the
+# shallowest ones going both down and back up -- likely the most expensive backbone
+# in this whole comparison series. Measure before committing to a long run.
+#
+# python train.py --config experiments/exp3_unet_slotformer/exp_unet_slotformer_4layer.yaml --ckpt_dir checkpoints_exp3_unet_4layer
+BASE_CONFIG: ../../configs/default.yaml
+
+BACKBONE:
+  TYPE: sparse_slot_unet
+  STAGE_CHANNELS: [64, 96, 128, 128]   # 4 layers -- this experiment's fixed axis value
+  NUM_BLOCKS_PER_STAGE: 0               # unused (no residual blocks anywhere in this backbone) --
+                                         # kept only because config_utils/detector.py require the key
+  DOWNSAMPLE_KERNEL: 3
+  DOWNSAMPLE_STRIDE: 2
+  SLOTFORMER_WIN_SIZE: 12
+  SLOTFORMER_NUM_CYCLES: 1              # 3L per stage, both encoder and decoder -- 4 encoder + 4 decoder
+                                         # stages x 3L = 24 SlotFormer layers total; start here, not 6L
+  SLOTFORMER_NUM_HEADS: 4
+
+SLOTFORMER:
+  ENABLED: false   # SlotFormer runs INSIDE every encoder/decoder stage here (BACKBONE.SLOTFORMER_*
+                    # above) -- must stay false here or detector.py attaches yet another one.
+
+# NOT measured on real hardware yet. Re-measure via train.py (real process, 250+ steps,
+# max_memory_reserved, watch for allocator creep) before trusting BATCH_SIZE/LR/epoch time --
+# CPU smoke test alone showed this as the heaviest of the four SlotFormer-backbone variants
+# tried so far (~10.5s/frame forward on CPU, vs ~2-3s for experiments/exp2_down_slot_up/).
+OPTIMIZATION:
+  BATCH_SIZE: 8
+  LR: 0.00424   # sqrt-scaled (0.003 * sqrt(8/4)) pre-emptively, same reasoning as the
+                # other SlotFormer-backbone configs.
+  NUM_EPOCHS: 20

@@ -1,0 +1,48 @@
+# Experiment: 4-stage downsample sparse encoder -> SlotFormer (at the coarsest,
+# cheapest-to-attend-over scale) -> configurable partial upsample decoder.
+# See models/backbone3d_down_slot_up.py's module docstring. voxelization/VFE/
+# detection head are untouched -- only the backbone changes, per the 2026-09
+# architecture discussion's scope. Built on this branch's own SlotFormer stack
+# (not the separate `unet` branch, which had no SlotFormer and was too slow).
+#
+# UPSAMPLE_STAGES is the knob to adjust: with 4 encoder stages of stride 2 each,
+# total downsample is 2^4=16x (1/16 resolution) before SlotFormer.
+#   UPSAMPLE_STAGES: 0 -> stays at 1/16 (no upsampling at all)
+#   UPSAMPLE_STAGES: 1 -> 1/8
+#   UPSAMPLE_STAGES: 2 -> 1/4   (measured: batch=8 ~4.2-4.9 GiB/8GiB, ~1.4-1.5s/it, ~77min/epoch)
+#   UPSAMPLE_STAGES: 3 -> 1/2   <- current default below, not yet re-measured at this depth
+#   UPSAMPLE_STAGES: 4 -> 1/1 (fully restored)
+#
+# python train.py --config configs/exp_sparse_down4_slot_up.yaml --ckpt_dir checkpoints_sparse_down4_slot_up
+BASE_CONFIG: default.yaml
+
+BACKBONE:
+  TYPE: sparse_down_slot_up
+  STAGE_CHANNELS: [64, 96, 128, 128]   # 4 stages, widens like VoxelNeXt's early stages,
+                                        # capped at 128 to match this project's proven head input width
+  NUM_BLOCKS_PER_STAGE: 2
+  DOWNSAMPLE_KERNEL: 3
+  DOWNSAMPLE_STRIDE: 2
+  UPSAMPLE_STAGES: 3                   # <-- adjust this (0..4) to trade resolution vs. cost
+  DECODER_BLOCKS_PER_STAGE: 2
+  SLOTFORMER_WIN_SIZE: 12
+  SLOTFORMER_NUM_CYCLES: 2             # 6L (x,y,z twice) -- matches exp_sparse_slotformer_6l's depth
+  SLOTFORMER_NUM_HEADS: 4
+
+SLOTFORMER:
+  ENABLED: false   # SlotFormer runs INSIDE this backbone (BACKBONE.SLOTFORMER_* above) --
+                    # must stay false here or detector.py attaches a second, redundant one.
+
+# BATCH_SIZE=8 measured real (train.py, RTX 2070, 277 steps/~10min) at UPSAMPLE_STAGES=3:
+# memory crept 5.96->6.99 GiB over the first ~160 steps then plateaued (~85% of 8GiB) --
+# no OOM, safe but with less headroom than UPSAMPLE_STAGES=2 (4.2-4.9 GiB), as expected
+# from one more decoder stage touching more active voxels at a shallower resolution.
+# ~2.2s/it -> ~2 hours/epoch -> ~40 hours for 20 epochs.
+# LR: sqrt-scaled (0.003 * sqrt(8/4) = 0.00424), not linear -- this backbone runs
+# SlotFormer internally (same divergence risk exp_sparse_slotformer_3l/6l hit at
+# linear-scaled LR: center-loss term spiking), so apply the same fix pre-emptively
+# instead of re-discovering it.
+OPTIMIZATION:
+  BATCH_SIZE: 8
+  LR: 0.00424
+  NUM_EPOCHS: 20

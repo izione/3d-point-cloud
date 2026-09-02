@@ -1,0 +1,28 @@
+# Experiment 1 (backbone-architecture comparison series): the original simple
+# single-stage downsample backbone (default.yaml's BACKBONE section -- one
+# SparseConv3dDown(stride=2) + 3 residual SparseBasicBlocks, never goes below 1/2
+# resolution) + external SlotFormer at 3 layers (NUM_CYCLES=1, one x/y/z pass).
+# Same setup as the original configs/exp_sparse_slotformer_3l.yaml -- copied here
+# under the new experiments/ organization, varying SlotFormer depth (3L vs 6L,
+# see exp_simple_slotformer_6l.yaml) as this experiment's axis.
+#
+# Already trained once (20 epochs, best val_loss 0.3201 @ep15, AP@0.30=0.390,
+# AP@0.35=0.305, AP@0.40=0.214 on the earlier TEST_SCENES split) -- see
+# configs/exp_sparse_slotformer_3l.yaml's checkpoints_sparse_slotformer_3l/ for
+# the original run's artifacts.
+#
+# python train.py --config experiments/exp1_simple_slotformer/exp_simple_slotformer_3l.yaml --ckpt_dir checkpoints_exp1_slotformer_3l
+BASE_CONFIG: ../../configs/default.yaml
+
+SLOTFORMER:
+  ENABLED: true
+  NUM_CYCLES: 1   # 3L
+
+# Measured on RTX 2070/Windows via train.py itself over 250+ real steps: batch=8
+# plateaued ~4.7GiB/57%, safely repeatable.
+# LR: sqrt-scaled (0.003 * sqrt(BATCH_SIZE/4)) rather than linear -- SlotFormer
+# diverged at a linear-scaled LR on the old (deeper) backbone (train_loss plateaued,
+# val's center-loss term spiked); sqrt scaling trained cleanly.
+OPTIMIZATION:
+  BATCH_SIZE: 8
+  LR: 0.00424

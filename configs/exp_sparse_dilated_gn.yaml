@@ -1,0 +1,39 @@
+# Experiment: same sparse backbone + SlotFormer(3L) as exp_sparse_slotformer_3l.yaml,
+# but with two backbone-internal changes (voxelization/VFE/detection head untouched,
+# per discussion -- only the conv stack in between changes):
+#
+#   1. BLOCK_DILATIONS: [1,2,4] on the 3 SubMConv3d residual blocks -- dilation grows
+#      receptive field WITHOUT moving the active set or changing resolution (unlike
+#      down_stride), so it doesn't reintroduce the effective-resolution regression
+#      documented in models/backbone3d.py's docstring. The question this asks: does
+#      SlotFormer's global attention become less necessary (or stack better) once the
+#      conv backbone itself already sees further than a plain dilation=1 stack?
+#   2. NORM_TYPE: group -- BatchNorm1d pools statistics across ALL active voxels in the
+#      batch, which is noisy when active-voxel counts swing widely frame to frame at
+#      this project's small batch sizes (8 here). GroupNorm's stats are per-sample.
+#      See sparse_ops.py's make_norm1d docstring for the full reasoning.
+#
+# This bundles two changes into one run (not a clean single-variable test) purely
+# for wall-clock cost reasons -- if this beats exp_sparse_slotformer_3l, follow up
+# with a dilation-only or group-norm-only run to see which one actually did it.
+#
+# python train.py --config configs/exp_sparse_dilated_gn.yaml --ckpt_dir checkpoints_sparse_dilated_gn
+BASE_CONFIG: default.yaml
+
+BACKBONE:
+  TYPE: sparse_dilated_gn   # forces the pure-PyTorch backbone (spconv's SubMConv3d has no
+                            # dilation/norm_type knobs) -- see backbone3d_auto.py
+  BLOCK_DILATIONS: [1, 2, 4]  # one entry per NUM_BLOCKS_PER_STAGE (3, from default.yaml)
+  NORM_TYPE: group
+
+SLOTFORMER:
+  ENABLED: true
+  NUM_CYCLES: 1
+
+OPTIMIZATION:
+  BATCH_SIZE: 8
+  LR: 0.00424   # unchanged from exp_sparse_slotformer_3l.yaml -- same batch size, and dilation/
+                # GroupNorm don't change the LR-sensitive parts (SlotFormer's attention, batch
+                # scaling), so reuse it as the starting point rather than re-deriving from scratch.
+                # Re-measure memory via train.py before trusting BATCH_SIZE=8 still fits, though --
+                # GroupNorm/dilated convs have a different memory profile than BatchNorm1d.

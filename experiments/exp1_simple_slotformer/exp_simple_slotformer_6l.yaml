@@ -1,0 +1,27 @@
+# Experiment 1 (backbone-architecture comparison series): same simple single-stage
+# downsample backbone as exp_simple_slotformer_3l.yaml, external SlotFormer at 6
+# layers (NUM_CYCLES=2, two full x/y/z passes) instead of 3 -- this experiment's
+# axis is SlotFormer depth (3L vs 6L) on an otherwise-identical backbone.
+# Copied from the original configs/exp_sparse_slotformer_6l.yaml under the new
+# experiments/ organization.
+#
+# Previous run was stopped at epoch 2 by request (comparison against 3L never
+# finished) -- checkpoints_sparse_slotformer_6l/ has epoch_0/epoch_1/epoch_2 if
+# resuming that specific run is ever wanted; this file is for a clean restart
+# under the new naming.
+#
+# python train.py --config experiments/exp1_simple_slotformer/exp_simple_slotformer_6l.yaml --ckpt_dir checkpoints_exp1_slotformer_6l
+BASE_CONFIG: ../../configs/default.yaml
+
+SLOTFORMER:
+  ENABLED: true
+  NUM_CYCLES: 2   # 6L
+
+# Measured on RTX 2070/Windows over 250 steps: batch=12 ~7.6GiB/93% (too tight),
+# batch=8 ~7.4GiB/90% (still too tight -- 6L's memory doesn't drop much between 8
+# and 12), batch=6 measured ~5.7GiB/69%, safely repeatable.
+# LR: sqrt-scaled (0.003 * sqrt(BATCH_SIZE/4)) -- 6L has even more SlotFormer
+# attention depth than 3L, at least as likely to be unstable at linear-scaled LR.
+OPTIMIZATION:
+  BATCH_SIZE: 6
+  LR: 0.00367

@@ -1,0 +1,42 @@
+# Experiment: the full encoder-decoder ("unet") structure, but with residual blocks
+# replaced by SlotFormer(3L) in EVERY stage -- both encoder AND decoder. See
+# models/backbone3d_slot_unet.py's module docstring for how this differs from the
+# other two SlotFormer-backbone experiments already in this repo
+# (exp_sparse_down4_slot_up.yaml keeps residual blocks + adds one bottleneck
+# SlotFormer; exp_sparse_slot_stages.yaml is encoder-only, no decoder at all).
+#
+# Always fully restores resolution (no UPSAMPLE_STAGES knob -- this is "the unet
+# structure", encoder depth == decoder depth by construction).
+#
+# Cost warning: SlotFormer now runs at every encoder AND decoder stage, including the
+# shallowest ones going both down and back up -- likely the most expensive of the
+# three SlotFormer-backbone variants. Measure before committing to a long run.
+#
+# python train.py --config configs/exp_sparse_slot_unet.yaml --ckpt_dir checkpoints_sparse_slot_unet
+BASE_CONFIG: default.yaml
+
+BACKBONE:
+  TYPE: sparse_slot_unet
+  STAGE_CHANNELS: [64, 96, 128, 128]   # same 4-stage width progression as the other two
+                                        # SlotFormer-backbone experiments, for fair comparison
+  NUM_BLOCKS_PER_STAGE: 0               # unused (no residual blocks anywhere in this backbone) --
+                                         # kept only because config_utils/detector.py require the key
+  DOWNSAMPLE_KERNEL: 3
+  DOWNSAMPLE_STRIDE: 2
+  SLOTFORMER_WIN_SIZE: 12
+  SLOTFORMER_NUM_CYCLES: 1              # 3L per stage, both encoder and decoder -- 4 encoder + 4 decoder
+                                         # stages x 3L = 24 SlotFormer layers total; start here, not 6L
+  SLOTFORMER_NUM_HEADS: 4
+
+SLOTFORMER:
+  ENABLED: false   # SlotFormer runs INSIDE every encoder/decoder stage here (BACKBONE.SLOTFORMER_*
+                    # above) -- must stay false here or detector.py attaches yet another one.
+
+# NOT measured on real hardware yet. Re-measure via train.py (real process, 250+ steps,
+# max_memory_reserved, watch for allocator creep) before trusting BATCH_SIZE/LR/epoch time --
+# this is expected to be the most expensive of the three SlotFormer-backbone variants.
+OPTIMIZATION:
+  BATCH_SIZE: 8
+  LR: 0.00424   # sqrt-scaled (0.003 * sqrt(8/4)) pre-emptively, same reasoning as the
+                # other two SlotFormer-backbone configs.
+  NUM_EPOCHS: 20

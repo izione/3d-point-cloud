@@ -1,0 +1,35 @@
+# Experiment 2 (backbone-architecture comparison series): 4-stage downsample sparse
+# encoder -> SlotFormer(3L, at the bottleneck) -> 2-stage upsample decoder (1/4
+# resolution). See models/backbone3d_down_slot_up.py's module docstring.
+#
+# One of 6 siblings in this folder varying two axes:
+#   SlotFormer depth (3L=NUM_CYCLES:1 / 6L=NUM_CYCLES:2) x UPSAMPLE_STAGES (2/3/4)
+# This file: 3L x up=2 -- the cheapest of all 6 (least upsampling, shallowest
+# SlotFormer) and a reasonable one to measure/run first.
+#
+# python train.py --config experiments/exp2_down_slot_up/exp_slotformer_4down_2up_3l.yaml --ckpt_dir checkpoints_exp2_4down_2up_3l
+BASE_CONFIG: ../../configs/default.yaml
+
+BACKBONE:
+  TYPE: sparse_down_slot_up
+  STAGE_CHANNELS: [64, 96, 128, 128]
+  NUM_BLOCKS_PER_STAGE: 2
+  DOWNSAMPLE_KERNEL: 3
+  DOWNSAMPLE_STRIDE: 2
+  UPSAMPLE_STAGES: 2
+  DECODER_BLOCKS_PER_STAGE: 2
+  SLOTFORMER_WIN_SIZE: 12
+  SLOTFORMER_NUM_CYCLES: 1   # 3L
+  SLOTFORMER_NUM_HEADS: 4
+
+SLOTFORMER:
+  ENABLED: false   # SlotFormer runs INSIDE this backbone (BACKBONE.SLOTFORMER_* above) --
+                    # must stay false here or detector.py attaches a second, redundant one.
+
+# NOT measured on real hardware yet -- likely the safest/cheapest of all 6 siblings
+# in this folder (fewest decoder stages, shallowest SlotFormer), but re-measure via
+# train.py before trusting these placeholder values.
+OPTIMIZATION:
+  BATCH_SIZE: 8
+  LR: 0.00424   # sqrt-scaled (0.003 * sqrt(8/4)) -- SlotFormer present.
+  NUM_EPOCHS: 20

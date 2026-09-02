@@ -1,11 +1,19 @@
 # diver_net
 
-Sonar-based 3D diver detector: VFE -> 4-stage 3D sparse conv backbone
-(filter widths 16/32/48/64, isotropic x/y/z downsampling every stage, no BEV
-collapse) -> SlotFormer (axial slot attention, softmax or linear +
-sinusoidal positional encoding) -> center heatmap / offset / box(w,l,h,
-quaternion) heads, trained with a dynamic (SimOTA-style) label assignment
-and a corner-distance regression cost.
+Sonar-based 3D diver detector: VFE -> 3D sparse conv backbone (isotropic x/y/z
+downsampling, no BEV collapse) -> SlotFormer (axial slot attention, softmax or
+linear + sinusoidal positional encoding) -> center heatmap / offset / box(w,l,h,
+quaternion) heads, trained with a dynamic (SimOTA-style) label assignment and
+a corner-distance regression cost.
+
+The backbone itself is swappable -- see **"Experiments"** below for the full
+comparison series (15 configs across 4 different backbone architectures) and
+how to run them. `configs/default.yaml`'s own `BACKBONE` section is the
+single proven-good baseline (1 stage, stride 2) everything else is compared
+against; going deeper without care regressed precision/recall badly in an
+earlier version of this backbone (see `models/backbone3d.py`'s history) --
+this is why "effective resolution" (`VOXEL_SIZE * backbone total_stride`)
+matters more than raw depth when changing this.
 
 No *hard* spconv / torch_scatter dependency -- every sparse op has a fallback
 implemented in plain PyTorch (`models/sparse_ops.py`), so the same code runs
@@ -199,6 +207,85 @@ python test.py --checkpoint checkpoints/default_linear_last.pth --split test
 Then compare `checkpoints/default_softmax_loss_history.csv` vs
 `checkpoints/default_linear_loss_history.csv` (val rows), and the two
 `test.py` reports (recall/precision/IoU sweep).
+
+## Experiments
+
+15 configs across 4 backbone families, all built on voxelization/VFE/detection
+head that never change -- only the 3D backbone differs between them. `models/
+backbone3d_auto.py`'s `build_backbone3d` picks the implementation from each
+config's `BACKBONE.TYPE`.
+
+| group | folder | backbone (`BACKBONE.TYPE`) | what varies |
+|---|---|---|---|
+| `original4` | `configs/exp_*.yaml` | `dense` / `auto` (single-stage sparse) | backbone family itself (dense vs sparse) x SlotFormer on/off/depth |
+| `exp1_simple_slotformer` | `experiments/exp1_simple_slotformer/` | `auto` (unchanged single-stage backbone) + external SlotFormer | SlotFormer depth only (3L / 6L) |
+| `exp2_down_slot_up` | `experiments/exp2_down_slot_up/` | `sparse_down_slot_up` (N-stage down -> SlotFormer at the bottleneck -> M-stage up, residual blocks kept throughout) | SlotFormer depth (3L/6L) x upsample depth (`UPSAMPLE_STAGES`: 2/3/4) -- 6 configs |
+| `exp3_unet_slotformer` | `experiments/exp3_unet_slotformer/` | `sparse_slot_unet` (full encoder-decoder, always fully restores; SlotFormer(3L) replaces residual blocks in *every* stage) | encoder/decoder depth (`STAGE_CHANNELS` length: 2/3/4 layers) |
+
+Two more backbone types exist but aren't part of the actively-compared series
+above -- `sparse_slot_stages` (encoder-only, SlotFormer replaces residual
+blocks per stage, no decoder) and `sparse_slot_light_unet` (SlotFormer in the
+encoder only, decoder kept as plain conv -- mirrors the common "ResNet
+encoder + light U-Net decoder" segmentation pattern). `configs/
+exp_sparse_slot_stages.yaml` / `exp_sparse_slot_light_unet.yaml` run them
+standalone via `train.py` directly; see each backbone module's own docstring
+(`models/backbone3d_*.py`) for the full design rationale and how they relate
+to the 4 groups above. `configs/exp_sparse_dilated_gn.yaml` (dilated residual
+blocks + GroupNorm) is kept for reference but was de-prioritized after
+dilation was judged risky for an object this small relative to voxel size --
+see its header comment.
+
+### Running experiments
+
+`run_all_experiments.py` is the single entry point -- every experiment gets
+its own `checkpoints/<name>/` (large `.pth` files, gitignored) and
+`logs/<name>/loss_history.csv` (small, per-step + per-epoch train/val loss --
+keep these even after cleaning up checkpoints, this is what you evaluate
+performance from):
+
+```bash
+# one experiment by name
+python run_all_experiments.py --only exp2_4down_3up_6l
+
+# a whole series
+python run_all_experiments.py --group exp2_down_slot_up   # all 6 in that series
+
+# literally everything (15 experiments, sequentially)
+python run_all_experiments.py
+
+# print every (name, config, group) without running anything
+python run_all_experiments.py --dry_run
+```
+
+`--only`/`--group` accept multiple values (`--only name1 name2`). `--epochs N`
+overrides `OPTIMIZATION.NUM_EPOCHS` for a quick real-data smoke run before
+committing to a full one.
+
+To run a single experiment with more manual control than `run_all_experiments.py`
+gives (custom `--resume`, `--attention_kind`, etc.), call `train.py` directly with
+that experiment's config, e.g.:
+
+```bash
+python train.py --config experiments/exp2_down_slot_up/exp_slotformer_4down_3up_6l.yaml \
+    --ckpt_dir checkpoints/exp2_4down_3up_6l --log_file logs/exp2_4down_3up_6l/loss_history.csv \
+    --exp_name exp2_4down_3up_6l
+```
+
+**Before committing to a full run of any new experiment**: none of the 4
+newer backbone families were measured on real hardware before being added
+(only `exp2_4down_3up_6l` has been actually trained, locally) -- each
+config's own header comment says what's measured vs. still a placeholder.
+Time a handful of real steps first (see "GPU optimization" below, or the
+timed cell in `colab_train.ipynb`) and adjust `BATCH_SIZE`/`LR` if needed --
+LR is sqrt-scaled (`0.003 * sqrt(BATCH_SIZE/4)`) rather than linear in every
+config that runs SlotFormer, since linear scaling caused the center-loss term
+to spike and diverge in earlier testing.
+
+`colab_train.ipynb` wraps all of the above for Colab: clone -> dataset ->
+Drive mount -> sanity check (`smoke_test.py`, covers every `configs/exp_*.yaml`
+*and* `experiments/*/*.yaml`) -> pick `EXPERIMENT_NAME` -> batch-size/speed
+check -> train -> evaluate, with checkpoints+logs written to Drive using the
+same `checkpoints/<name>/` + `logs/<name>/loss_history.csv` layout as above.
 
 ## Test / evaluate
 

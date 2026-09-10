@@ -89,6 +89,13 @@ def main():
                               "paper-faithful yaw-only-flattened target (default off)")
     parser.add_argument("--smoke", action="store_true",
                          help="truncate train/val to a handful of frames -- pipeline sanity check only")
+    parser.add_argument("--resume", default=None,
+                         help="path to a checkpoint (e.g. checkpoints_centerpoint/epoch_7.pth) to "
+                              "resume from -- restores model weights and continues at epoch+1 for "
+                              "the remaining --epochs. Best-AP tracking restarts at -1 on resume "
+                              "(only affects which epoch this run prints as \"best\" at the end); "
+                              "every epoch's checkpoint is still saved regardless, so a disconnect "
+                              "never loses a completed epoch.")
     args = parser.parse_args()
 
     random.seed(args.seed)
@@ -120,6 +127,13 @@ def main():
                                  weight_decay=args.weight_decay)
     loss_keys = ["hm_loss", "reg_loss"]
 
+    start_epoch = 0
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device)
+        model.load_state_dict(ckpt["model"])
+        start_epoch = ckpt["epoch"] + 1
+        print(f"resumed from {args.resume} (epoch {ckpt['epoch']}) -- continuing at epoch {start_epoch}")
+
     ckpt_dir = Path(args.ckpt_dir)
     ckpt_dir.mkdir(parents=True, exist_ok=True)
     log_path = ckpt_dir / "loss_history.csv"
@@ -134,7 +148,7 @@ def main():
         log_file.flush()
 
     best_ap35, best_epoch = -1.0, None
-    for epoch in range(args.epochs):
+    for epoch in range(start_epoch, args.epochs):
         lr = lr_at_epoch(epoch, args.epochs, args.lr, args.lr_decay_epoch_frac, args.lr_decay_factor)
         for g in optimizer.param_groups:
             g["lr"] = lr

@@ -2,11 +2,21 @@
 VoxelNet-style VFE + a SPARSE 3D middle encoder + 2D RPN backbone. The paper's
 own words: "we follow the network designs of SECOND for the backbone" --
 SECOND (Yan et al. 2018) is itself the paper that replaced VoxelNet's
-original dense Conv3D middle layers with sparse convolution (spconv), so a
+original dense Conv3D middle layers with sparse convolution, so a
 paper-faithful CenterPoint backbone is sparse, not dense. (An earlier version
 of this file used dense Conv3D instead, purely to dodge a spconv install
-dependency -- that was NOT what the paper does; this version requires spconv,
-see requirements.txt/README.md.)
+dependency -- that was NOT what the paper does.)
+
+The sparse conv itself is a pure-PyTorch implementation (sparse_conv_pure.py),
+not spconv -- real-world testing (2026-09) hit a hard, unresolved upstream
+packaging bug in spconv's own cumm dependency on every available CUDA tag
+(official PyPI cu126: cumm's bundled tensorview C++ headers are missing from
+the wheel, github.com/traveller59/spconv#766 /
+github.com/FindDefinition/cumm#7; the rathaROG community index built to work
+around exactly this only publishes cu128/cu130, not cu126). sparse_conv_pure.py
+sidesteps the whole problem: no compiled extension, so no CUDA-tag-matching
+to get right at all. See its own docstring and test_sparse_conv_pure.py for
+the correctness proof (exact match against nn.Conv3d).
 
 Feeds a single CenterHead (Sec.3.1): Gaussian-heatmap classification +
 sub-voxel offset / absolute height / log-size / 6D-rotation regression, no
@@ -24,15 +34,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-try:
-    import spconv.pytorch as spconv
-except ImportError as _e:
-    raise ImportError(
-        "This model requires spconv (paper-faithful sparse 3D backbone). "
-        "Install the CUDA build matching your runtime, e.g. "
-        "`pip install spconv-cu120` (pick the cuXXX tag for your CUDA version) -- "
-        "see README.md's Colab/local setup sections.") from _e
-
+import sparse_conv_pure as spconv
 import config
 from sparse_ops import restrict_xy_support, yx_key
 
@@ -104,15 +106,16 @@ class SparseMiddleEncoder(nn.Module):
     """SECOND-style sparse 3D middle encoder -- same 3-layer shape as the
     dense VoxelNet ConvMiddleLayers it replaces (128->64->64->64, D'(=10)
     reduced to 2 via stride(2,1,1)/stride(1,1,1,pad=(0,1,1))/stride(2,1,1)),
-    computed with spconv over only the active voxels instead of a dense
-    (B,128,D,H,W) tensor. Returns a genuine dense (B,64*D_out,H,W) tensor
-    (via SparseConvTensor.dense() + reshape) -- the 2D RPNBackbone needs a
-    real dense tensor, so densifying here (once, right after the sparse 3D
-    stage) is the natural sparse/dense boundary, matching SECOND's own design
-    and ConvMiddleLayers' own reshape convention.
+    computed (via sparse_conv_pure.py, a pure-PyTorch sparse conv) over only
+    the active voxels instead of a dense (B,128,D,H,W) tensor. Returns a
+    genuine dense (B,64*D_out,H,W) tensor (via SparseConvTensor.dense() +
+    reshape) -- the 2D RPNBackbone needs a real dense tensor, so densifying
+    here (once, right after the sparse 3D stage) is the natural sparse/dense
+    boundary, matching SECOND's own design and ConvMiddleLayers' own reshape
+    convention.
 
     Every layer here has stride=1 in x,y (even the two stride=(2,1,1)
-    layers) -- spconv.SparseConv3d (regular, not submanifold) still discovers
+    layers) -- a regular (non-submanifold) sparse conv still discovers
     neighbor-reachable x,y positions beyond the input support for a
     z-only-stride conv, so restrict_xy_support is applied after each layer to
     keep the active x,y set exactly what it should be (see sparse_ops.py)."""

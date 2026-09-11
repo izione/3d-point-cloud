@@ -12,7 +12,7 @@ See `colab_train.ipynb` for a ready-to-run Colab notebook (clone, dataset
 fetch from a Google Drive `dataset.zip`, smoke test, train, evaluate).
 
 **Breaking change (backbone now sparse, not dense)**: this version's
-`model.py` uses a spconv-based sparse 3D middle encoder, replacing an earlier
+`model.py` uses a sparse 3D middle encoder, replacing an earlier
 dense-`nn.Conv3d` version. State dicts are NOT compatible across the two --
 any checkpoint trained before this change (dense backbone) will fail to load
 here (different parameter names/shapes) and must be retrained from scratch.
@@ -21,11 +21,18 @@ here (different parameter names/shapes) and must be retrained from scratch.
 middle encoder -> 2D RPN backbone -- the paper's own choice ("we largely
 follow the network designs of SECOND for the backbone"): SECOND is itself
 the paper that replaced VoxelNet's original dense Conv3D middle layers with
-sparse convolution (spconv), so this backbone is sparse, matching the paper
-(an earlier version of this file used dense `nn.Conv3d` instead purely to
-avoid the spconv install -- that was NOT what the paper does, and has been
-replaced). **Requires spconv** -- see the setup sections below
-(`pip install spconv-cuXXX`, picking the tag matching your CUDA version).
+sparse convolution, so this backbone is sparse, matching the paper (an
+earlier version of this file used dense `nn.Conv3d` instead purely to avoid
+a native-extension install -- that was NOT what the paper does, and has been
+replaced). The sparse conv itself is `sparse_conv_pure.py`, a from-scratch
+**pure-PyTorch** implementation, NOT spconv -- real-world testing hit an
+unresolved upstream packaging bug in spconv's own `cumm` dependency on every
+available CUDA tag (missing C++ headers in the published wheel, see
+`model.py`'s docstring for the exact GitHub issues). No compiled extension
+means no CUDA-tag-matching to get right at all: this just needs whatever
+torch is already installed. Correctness is checked directly against
+`nn.Conv3d` in `test_sparse_conv_pure.py` (exact match, run it yourself with
+`python test_sparse_conv_pure.py`).
 
 **Head**: CenterHead (paper Sec.3.1) -- Gaussian-heatmap center classification
 + sub-voxel offset / absolute height / log-size / rotation regression, no
@@ -54,46 +61,13 @@ repo).
 !git clone -b centerpoint https://github.com/izione/3d-point-cloud.git
 %cd 3d-point-cloud
 !pip install -r requirements.txt
-
-# REQUIRED (paper-faithful sparse backbone) -- check torch's CUDA build FIRST
-# and pick the matching spconv-cuXXX tag; installing the wrong one is exactly
-# the `ImportError: This model requires spconv...` you'll hit at import time
-# (pip install can silently succeed while the compiled kernels still don't
-# match your actual CUDA/driver). See https://github.com/traveller59/spconv
-# for the full tag list (cu116/cu117/cu118/cu120/cu126 as of this writing).
-import torch
-print(torch.__version__, torch.version.cuda)   # e.g. "2.4.0+cu121 12.1" -> use spconv-cu120
-!pip install -q spconv-cu126   # <-- change the cuXXX suffix to match the line above
 ```
+That's it -- no native-extension install, no CUDA-tag matching (see the
+sparse-backbone note above). Any Colab GPU runtime with torch already
+installed works as-is.
 
-If `torch.version.cuda` is newer than spconv's newest official tag (cu126 as
-of this writing -- a Colab image with cu127/cu128/cu129 has no matching
-official spconv wheel, see https://github.com/traveller59/spconv/issues/775),
-the fix is to reinstall torch itself against the cu126 build, THEN install
-spconv-cu126 (keeps both packages on official PyPI) -- **and then restart the
-Colab runtime** (Runtime > Restart session) before importing either one.
-torch is a C-extension module that registers process-wide ops at import
-time; those registrations can't be redone in the same already-running
-process (a `pip install`-then-`import` in the same session raises
-`RuntimeError: Only a single TORCH_LIBRARY can be used...`) -- reinstalling
-torch only actually takes effect in a fresh process:
-```python
-!pip install -q torch --index-url https://download.pytorch.org/whl/cu126
-!pip install -q spconv-cu126
-# now: Runtime > Restart session, then re-run the notebook from the top
-```
-(A community wheel index also publishes a cu128 spconv build directly --
-`pip install cumm-cu128 spconv-cu128 --extra-index-url https://ratharog.github.io/cumm-spconv/`
--- that works too if you'd rather keep torch's newer CUDA build, just isn't
-the official distribution channel.)
-
-`colab_train.ipynb`'s own install cell does this automatically (reads
-`torch.version.cuda`, tries the matching official tag, and falls back to the
-torch-reinstall-as-cu126 fix above if no official tag matches) -- use it instead
-of the snippet above when running the notebook rather than copy-pasting cells.
-
-See `colab_train.ipynb` for the full flow (spconv install, dataset download
-from a Drive share link, smoke test, train, evaluate) -- the short version:
+See `colab_train.ipynb` for the full flow (dataset download from a Drive
+share link, smoke test, train, evaluate) -- the short version:
 
 ```python
 # fetch dataset.zip (Person1/scene_0000/... at its top level) from a Drive
@@ -131,12 +105,7 @@ python -m venv .venv
 pip install -r requirements.txt
 pip install torch --index-url https://download.pytorch.org/whl/cu126   # pick the cuXXX tag matching your driver
 python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
-
-# REQUIRED (paper-faithful sparse backbone) -- pick the cuXXX tag matching
-# the torch build above (see https://github.com/traveller59/spconv for the
-# supported tag list)
-pip install spconv-cu126
-python -c "import spconv; print(spconv.__version__)"
+python test_sparse_conv_pure.py   # correctness check for the sparse backbone -- no native extension needed
 ```
 
 ## Train

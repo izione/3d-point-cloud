@@ -4,13 +4,17 @@ Krahenbuhl, CVPR 2021) reproduction on our sonar diver dataset.
 Backbone follows the paper's own choice of 3D backbone ("we largely follow
 the network designs of second... [a] voxel feature encoder followed by a
 sparse 3D backbone"): VoxelNet(Zhou&Tuzel 2018)-style VFE stack -> SPARSE
-Conv3D middle layers (spconv, SECOND's own replacement for VoxelNet's
-original dense Conv3D) -> 2D RPN. Requires spconv -- see README.md's Colab/
-local setup (`pip install spconv-cuXXX`, pick the tag matching your CUDA).
-This exact backbone shape (StackedVFE + a spconv middle encoder of the same
-128->64->64->64 layer shape + RPNBackbone) is already validated end-to-end
-on this same dataset in the sibling voxelnet_baseline repo's own
-sparse_conv_middle.py -- ported here.
+Conv3D middle layers -> 2D RPN. The sparse conv is a pure-PyTorch
+implementation (sparse_conv_pure.py) rather than spconv -- no native
+extension, no CUDA-tag install to get right (see model.py's docstring for
+why: spconv's cumm dependency has an unresolved packaging bug on every
+available CUDA tag as of this writing). This exact backbone shape
+(StackedVFE + a spconv-equivalent middle encoder of the same 128->64->64->64
+layer shape + RPNBackbone) is already validated end-to-end on this same
+dataset in the sibling voxelnet_baseline repo's own sparse_conv_middle.py
+(that one does use real spconv, on a machine where it installs cleanly) --
+ported here, and separately verified bit-exact against nn.Conv3d in
+test_sparse_conv_pure.py.
 
 Grid/anchor-geometry constants below are that repo's own dense-pipeline
 values (model/config.py, model/voxelnet_exp/ve_config.py) -- calibrated

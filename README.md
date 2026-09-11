@@ -70,11 +70,17 @@ If `torch.version.cuda` is newer than spconv's newest official tag (cu126 as
 of this writing -- a Colab image with cu127/cu128/cu129 has no matching
 official spconv wheel, see https://github.com/traveller59/spconv/issues/775),
 the fix is to reinstall torch itself against the cu126 build, THEN install
-spconv-cu126 (keeps both packages on official PyPI):
+spconv-cu126 (keeps both packages on official PyPI) -- **and then restart the
+Colab runtime** (Runtime > Restart session) before importing either one.
+torch is a C-extension module that registers process-wide ops at import
+time; those registrations can't be redone in the same already-running
+process (a `pip install`-then-`import` in the same session raises
+`RuntimeError: Only a single TORCH_LIBRARY can be used...`) -- reinstalling
+torch only actually takes effect in a fresh process:
 ```python
 !pip install -q torch --index-url https://download.pytorch.org/whl/cu126
 !pip install -q spconv-cu126
-import spconv; print(spconv.__version__)
+# now: Runtime > Restart session, then re-run the notebook from the top
 ```
 (A community wheel index also publishes a cu128 spconv build directly --
 `pip install cumm-cu128 spconv-cu128 --extra-index-url https://ratharog.github.io/cumm-spconv/`

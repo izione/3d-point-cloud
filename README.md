@@ -65,9 +65,25 @@ import torch
 print(torch.__version__, torch.version.cuda)   # e.g. "2.4.0+cu121 12.1" -> use spconv-cu120
 !pip install -q spconv-cu126   # <-- change the cuXXX suffix to match the line above
 ```
+
+If `torch.version.cuda` is newer than spconv's newest official tag (cu126 as
+of this writing -- a Colab image with cu127/cu128/cu129 has no matching
+official spconv wheel, see https://github.com/traveller59/spconv/issues/775),
+the fix is to reinstall torch itself against the cu126 build, THEN install
+spconv-cu126 (keeps both packages on official PyPI):
+```python
+!pip install -q torch --index-url https://download.pytorch.org/whl/cu126
+!pip install -q spconv-cu126
+import spconv; print(spconv.__version__)
+```
+(A community wheel index also publishes a cu128 spconv build directly --
+`pip install cumm-cu128 spconv-cu128 --extra-index-url https://ratharog.github.io/cumm-spconv/`
+-- that works too if you'd rather keep torch's newer CUDA build, just isn't
+the official distribution channel.)
+
 `colab_train.ipynb`'s own install cell does this automatically (reads
-`torch.version.cuda`, tries the matching tag, falls back through a candidate
-list if that one doesn't actually import after installing) -- use it instead
+`torch.version.cuda`, tries the matching official tag, and falls back to the
+torch-reinstall-as-cu126 fix above if no official tag matches) -- use it instead
 of the snippet above when running the notebook rather than copy-pasting cells.
 
 See `colab_train.ipynb` for the full flow (spconv install, dataset download

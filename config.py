@@ -3,12 +3,14 @@ Krahenbuhl, CVPR 2021) reproduction on our sonar diver dataset.
 
 Backbone follows the paper's own choice of 3D backbone ("we largely follow
 the network designs of second... [a] voxel feature encoder followed by a
-sparse 3D backbone"): VoxelNet(Zhou&Tuzel 2018)-style VFE stack -> dense-grid
-scatter -> Conv3D middle layers -> 2D RPN (SECOND's own dense re-derivation
-of the same backbone, no spconv dependency needed -- keeps this Colab-ready
-with a plain `pip install torch`). This exact backbone (StackedVFE +
-ConvMiddleLayers + RPNBackbone) is already validated end-to-end on this same
-dataset in the sibling voxelnet_baseline repo -- ported here unchanged.
+sparse 3D backbone"): VoxelNet(Zhou&Tuzel 2018)-style VFE stack -> SPARSE
+Conv3D middle layers (spconv, SECOND's own replacement for VoxelNet's
+original dense Conv3D) -> 2D RPN. Requires spconv -- see README.md's Colab/
+local setup (`pip install spconv-cuXXX`, pick the tag matching your CUDA).
+This exact backbone shape (StackedVFE + a spconv middle encoder of the same
+128->64->64->64 layer shape + RPNBackbone) is already validated end-to-end
+on this same dataset in the sibling voxelnet_baseline repo's own
+sparse_conv_middle.py -- ported here.
 
 Grid/anchor-geometry constants below are that repo's own dense-pipeline
 values (model/config.py, model/voxelnet_exp/ve_config.py) -- calibrated

@@ -11,12 +11,21 @@ without `-b centerpoint` checks out `main` instead and won't have these files.
 See `colab_train.ipynb` for a ready-to-run Colab notebook (clone, dataset
 fetch from a Google Drive `dataset.zip`, smoke test, train, evaluate).
 
-**Backbone**: VoxelNet(Zhou&Tuzel 2018)-style VFE stack -> dense-grid scatter
--> Conv3D middle layers -> 2D RPN backbone -- the paper's own choice ("we
-largely follow the network designs of SECOND for the backbone"), re-derived
-here as plain dense `nn.Conv3d`/`nn.Conv2d` instead of a sparse-conv library,
-so this needs no spconv/native-extension install and runs identically on CPU
-(for testing) and Colab GPU.
+**Breaking change (backbone now sparse, not dense)**: this version's
+`model.py` uses a spconv-based sparse 3D middle encoder, replacing an earlier
+dense-`nn.Conv3d` version. State dicts are NOT compatible across the two --
+any checkpoint trained before this change (dense backbone) will fail to load
+here (different parameter names/shapes) and must be retrained from scratch.
+
+**Backbone**: VoxelNet(Zhou&Tuzel 2018)-style VFE stack -> a SPARSE Conv3D
+middle encoder -> 2D RPN backbone -- the paper's own choice ("we largely
+follow the network designs of SECOND for the backbone"): SECOND is itself
+the paper that replaced VoxelNet's original dense Conv3D middle layers with
+sparse convolution (spconv), so this backbone is sparse, matching the paper
+(an earlier version of this file used dense `nn.Conv3d` instead purely to
+avoid the spconv install -- that was NOT what the paper does, and has been
+replaced). **Requires spconv** -- see the setup sections below
+(`pip install spconv-cuXXX`, picking the tag matching your CUDA version).
 
 **Head**: CenterHead (paper Sec.3.1) -- Gaussian-heatmap center classification
 + sub-voxel offset / absolute height / log-size / rotation regression, no
@@ -45,10 +54,15 @@ repo).
 !git clone -b centerpoint https://github.com/izione/3d-point-cloud.git
 %cd 3d-point-cloud
 !pip install -r requirements.txt
+
+# REQUIRED (paper-faithful sparse backbone) -- pick the cuXXX tag matching
+# this Colab runtime's CUDA version (`!nvcc --version` or check the T4/A100
+# image's known CUDA release; cu120/cu121 has worked on recent Colab images).
+!pip install -q spconv-cu120
 ```
 
-See `colab_train.ipynb` for the full flow (dataset download from a Drive
-share link, smoke test, train, evaluate) -- the short version:
+See `colab_train.ipynb` for the full flow (spconv install, dataset download
+from a Drive share link, smoke test, train, evaluate) -- the short version:
 
 ```python
 # fetch dataset.zip (Person1/scene_0000/... at its top level) from a Drive
@@ -86,6 +100,12 @@ python -m venv .venv
 pip install -r requirements.txt
 pip install torch --index-url https://download.pytorch.org/whl/cu126   # pick the cuXXX tag matching your driver
 python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_device_name(0))"
+
+# REQUIRED (paper-faithful sparse backbone) -- pick the cuXXX tag matching
+# the torch build above (see https://github.com/traveller59/spconv for the
+# supported tag list)
+pip install spconv-cu126
+python -c "import spconv; print(spconv.__version__)"
 ```
 
 ## Train

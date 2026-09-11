@@ -1,3 +1,7 @@
 numpy
 shapely
 tqdm
+
+# spconv is REQUIRED (paper-faithful sparse 3D backbone) but deliberately not
+# pinned here -- the correct package name depends on your CUDA version
+# (e.g. spconv-cu120, spconv-cu126). See README.md's setup sections.

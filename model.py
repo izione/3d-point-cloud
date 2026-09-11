@@ -1,8 +1,14 @@
 """model.py - CenterPoint (Yin, Zhou & Krahenbuhl, CVPR 2021) reproduction:
-VoxelNet-style VFE + Conv3D middle layers + 2D RPN backbone (the paper's own
-"we follow SECOND for the backbone" choice, re-derived as dense conv so this
-needs no spconv/native-extension install -- CPU-testable, Colab-GPU-ready)
-feeding a single CenterHead (Sec.3.1): Gaussian-heatmap classification +
+VoxelNet-style VFE + a SPARSE 3D middle encoder + 2D RPN backbone. The paper's
+own words: "we follow the network designs of SECOND for the backbone" --
+SECOND (Yan et al. 2018) is itself the paper that replaced VoxelNet's
+original dense Conv3D middle layers with sparse convolution (spconv), so a
+paper-faithful CenterPoint backbone is sparse, not dense. (An earlier version
+of this file used dense Conv3D instead, purely to dodge a spconv install
+dependency -- that was NOT what the paper does; this version requires spconv,
+see requirements.txt/README.md.)
+
+Feeds a single CenterHead (Sec.3.1): Gaussian-heatmap classification +
 sub-voxel offset / absolute height / log-size / 6D-rotation regression, no
 anchors, no NMS at decode time (3x3 max-pool peak extraction instead).
 
@@ -12,12 +18,23 @@ same backbone for its own ablation program), this file has ONLY the
 CenterPoint paper's own 5 regression targets (heatmap/offset/z/dim/rot) and
 nothing else.
 """
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
+
+try:
+    import spconv.pytorch as spconv
+except ImportError as _e:
+    raise ImportError(
+        "This model requires spconv (paper-faithful sparse 3D backbone). "
+        "Install the CUDA build matching your runtime, e.g. "
+        "`pip install spconv-cu120` (pick the cuXXX tag for your CUDA version) -- "
+        "see README.md's Colab/local setup sections.") from _e
 
 import config
+from sparse_ops import restrict_xy_support, yx_key
 
 
 def _pool_points(pointwise: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -83,23 +100,56 @@ class StackedVFE(nn.Module):
         return voxelwise
 
 
-class ConvMiddleLayers(nn.Module):
-    """3x Conv3D, D'(=10) -> 2, channels -> 64 (paper's own car-config shape)."""
+class SparseMiddleEncoder(nn.Module):
+    """SECOND-style sparse 3D middle encoder -- same 3-layer shape as the
+    dense VoxelNet ConvMiddleLayers it replaces (128->64->64->64, D'(=10)
+    reduced to 2 via stride(2,1,1)/stride(1,1,1,pad=(0,1,1))/stride(2,1,1)),
+    computed with spconv over only the active voxels instead of a dense
+    (B,128,D,H,W) tensor. Returns a genuine dense (B,64*D_out,H,W) tensor
+    (via SparseConvTensor.dense() + reshape) -- the 2D RPNBackbone needs a
+    real dense tensor, so densifying here (once, right after the sparse 3D
+    stage) is the natural sparse/dense boundary, matching SECOND's own design
+    and ConvMiddleLayers' own reshape convention.
+
+    Every layer here has stride=1 in x,y (even the two stride=(2,1,1)
+    layers) -- spconv.SparseConv3d (regular, not submanifold) still discovers
+    neighbor-reachable x,y positions beyond the input support for a
+    z-only-stride conv, so restrict_xy_support is applied after each layer to
+    keep the active x,y set exactly what it should be (see sparse_ops.py)."""
 
     def __init__(self):
         super().__init__()
-        self.conv1 = nn.Conv3d(128, 64, 3, stride=(2, 1, 1), padding=(1, 1, 1))
-        self.bn1 = nn.BatchNorm3d(64)
-        self.conv2 = nn.Conv3d(64, 64, 3, stride=(1, 1, 1), padding=(0, 1, 1))
-        self.bn2 = nn.BatchNorm3d(64)
-        self.conv3 = nn.Conv3d(64, 64, 3, stride=(2, 1, 1), padding=(1, 1, 1))
-        self.bn3 = nn.BatchNorm3d(64)
+        self.conv1 = spconv.SparseConv3d(128, 64, 3, stride=(2, 1, 1), padding=(1, 1, 1),
+                                          indice_key="cp_mid1")
+        self.bn1 = nn.BatchNorm1d(64)
+        self.conv2 = spconv.SparseConv3d(64, 64, 3, stride=(1, 1, 1), padding=(0, 1, 1),
+                                          indice_key="cp_mid2")
+        self.bn2 = nn.BatchNorm1d(64)
+        self.conv3 = spconv.SparseConv3d(64, 64, 3, stride=(2, 1, 1), padding=(1, 1, 1),
+                                          indice_key="cp_mid3")
+        self.bn3 = nn.BatchNorm1d(64)
+        self.relu = nn.ReLU(inplace=True)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = F.relu(self.bn1(self.conv1(x)))
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = F.relu(self.bn3(self.conv3(x)))
-        return x
+    def forward(self, x) -> torch.Tensor:
+        """x: spconv.SparseConvTensor, features=(K_total,128). -> (B,64*D_out,H,W)."""
+        H, W = x.spatial_shape[1], x.spatial_shape[2]
+        allowed_keys = torch.unique(yx_key(x.indices, H, W))
+
+        x = self.conv1(x)
+        x = x.replace_feature(self.relu(self.bn1(x.features)))
+        x = restrict_xy_support(x, allowed_keys, H, W)
+
+        x = self.conv2(x)
+        x = x.replace_feature(self.relu(self.bn2(x.features)))
+        x = restrict_xy_support(x, allowed_keys, H, W)
+
+        x = self.conv3(x)
+        x = x.replace_feature(self.relu(self.bn3(x.features)))
+        x = restrict_xy_support(x, allowed_keys, H, W)
+
+        dense = x.dense()  # (B,64,D_out,H,W), zero-filled where inactive
+        B, C, D, H_, W_ = dense.shape
+        return dense.reshape(B, C * D, H_, W_)
 
 
 class RPNBlock(nn.Module):
@@ -196,7 +246,7 @@ class CenterPointVoxelNet(nn.Module):
     def __init__(self):
         super().__init__()
         self.vfe = StackedVFE()
-        self.middle = ConvMiddleLayers()
+        self.middle = SparseMiddleEncoder()
         self.backbone = RPNBackbone()
         self.head = CenterHead(self.backbone.out_channels)
         self.grid_size = config.GRID_SIZE  # (W',H',D')
@@ -209,14 +259,9 @@ class CenterPointVoxelNet(nn.Module):
 
         B = int(coords[:, 0].max().item()) + 1 if len(coords) else 1
         Wp, Hp, Dp = self.grid_size
-        dense = voxelwise.new_zeros(B, 128, Dp, Hp, Wp)
-        if len(coords):
-            b, z, y, x = coords[:, 0], coords[:, 1], coords[:, 2], coords[:, 3]
-            dense[b, :, z, y, x] = voxelwise
+        sparse_in = spconv.SparseConvTensor(voxelwise, coords.int(), (Dp, Hp, Wp), B)
 
-        mid = self.middle(dense)  # (B,64,D'',H',W')
-        B_, C, D_, H_, W_ = mid.shape
-        feat2d = mid.reshape(B_, C * D_, H_, W_)  # paper Sec.3.1 "reshaping"
+        feat2d = self.middle(sparse_in)  # (B,64*D'',H',W') -- already reshaped, paper Sec.3.1 "reshaping"
 
         feat = self.backbone(feat2d)
         return self.head(feat)

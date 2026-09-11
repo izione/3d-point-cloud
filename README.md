@@ -55,11 +55,20 @@ repo).
 %cd 3d-point-cloud
 !pip install -r requirements.txt
 
-# REQUIRED (paper-faithful sparse backbone) -- pick the cuXXX tag matching
-# this Colab runtime's CUDA version (`!nvcc --version` or check the T4/A100
-# image's known CUDA release; cu120/cu121 has worked on recent Colab images).
-!pip install -q spconv-cu120
+# REQUIRED (paper-faithful sparse backbone) -- check torch's CUDA build FIRST
+# and pick the matching spconv-cuXXX tag; installing the wrong one is exactly
+# the `ImportError: This model requires spconv...` you'll hit at import time
+# (pip install can silently succeed while the compiled kernels still don't
+# match your actual CUDA/driver). See https://github.com/traveller59/spconv
+# for the full tag list (cu116/cu117/cu118/cu120/cu126 as of this writing).
+import torch
+print(torch.__version__, torch.version.cuda)   # e.g. "2.4.0+cu121 12.1" -> use spconv-cu120
+!pip install -q spconv-cu126   # <-- change the cuXXX suffix to match the line above
 ```
+`colab_train.ipynb`'s own install cell does this automatically (reads
+`torch.version.cuda`, tries the matching tag, falls back through a candidate
+list if that one doesn't actually import after installing) -- use it instead
+of the snippet above when running the notebook rather than copy-pasting cells.
 
 See `colab_train.ipynb` for the full flow (spconv install, dataset download
 from a Drive share link, smoke test, train, evaluate) -- the short version:

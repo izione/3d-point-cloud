@@ -5,10 +5,11 @@ from .vfe import VFE
 from .vfe_m import MVFE
 from .backbone3d_auto import build_backbone3d
 from .slotformer import SlotFormerBackbone
-from .decoder_detr import DetrDecoder, pad_tokens, token_positional_embedding
+from .decoder_detr import DetrDecoder, pad_tokens, token_positional_embedding, ref_point_positional_embedding
 from .heads_detr import SetPredictionHead
 from .matcher import HungarianMatcher
-from .losses_detr import compute_detr_loss
+from .losses_detr import compute_detr_loss, compute_denoising_loss
+from .denoising import QueryDenoising, build_attention_mask
 from .sparse_ops import build_index_grid
 from data.dataset import voxelize_batch
 
@@ -18,7 +19,18 @@ class DiverDetectorDETR(nn.Module):
     DiverDetector (unchanged, reused as-is), but with a DETR-style query decoder
     + set-prediction head in place of the dense per-voxel CenterPoint-style head
     -- see the SparseVoxFormer adaptation plan for why. Only the head after the
-    trunk differs; keep both trunks in sync if one changes."""
+    trunk differs; keep both trunks in sync if one changes.
+
+    Training-only query denoising (models/denoising.py) adds extra queries
+    built from noised GT boxes alongside the normal learned ("matching")
+    queries -- forward() runs both through the same decoder call (with an
+    attention mask keeping them from leaking into each other) and returns the
+    matching-only predictions plus an optional denoising bundle; loss() adds
+    both loss terms together. At eval time (self.training=False) there is no
+    denoising, so forward()'s dn_info is always None and pred is exactly the
+    matching queries' output -- decode()/test_detr.py don't need to know
+    denoising exists at all.
+    """
 
     def __init__(self, cfg):
         super().__init__()
@@ -54,6 +66,14 @@ class DiverDetectorDETR(nn.Module):
         mcfg = cfg["MATCHER"]
         self.matcher = HungarianMatcher(mcfg["COST_CLS"], mcfg["COST_CENTER"], mcfg["COST_SIZE"], mcfg["COST_ROT"])
 
+        ncfg = cfg.get("DENOISING", {})
+        self.use_denoising = ncfg.get("ENABLED", False)
+        if self.use_denoising:
+            self.denoising = QueryDenoising(
+                channels, ncfg.get("NUM_GROUPS", 5), ncfg.get("CENTER_NOISE_SCALE", 0.4),
+                ncfg.get("SIZE_NOISE_SCALE", 0.4), ncfg.get("ROT_NOISE_DEG", 15.0),
+            )
+
     def _to_device(self, batch, device):
         # same pattern as models/detector.py::DiverDetector._to_device -- voxel
         # coords are computed on-device (voxelize_batch), not in the CPU dataloader
@@ -82,14 +102,54 @@ class DiverDetectorDETR(nn.Module):
         pos = token_positional_embedding(bb_coords, channels, self.pc_range, eff_voxel_size)
         key_pos, _ = pad_tokens(pos, bb_coords[:, 0], b["batch_size"])
 
-        query_feat, ref_points = self.decoder(key_pad, key_pos, key_padding_mask, self.pc_range, b["batch_size"])
-        pred = self.head(query_feat, ref_points)
-        return pred, b["gt_boxes"]
+        num_matching = self.decoder.num_queries
+        match_content = self.decoder.matching_content(b["batch_size"])
+        match_ref = self.decoder.matching_reference_points(self.pc_range)[None, :, :].expand(b["batch_size"], -1, -1)
+
+        dn_bundle = None
+        if self.training and self.use_denoising:
+            built = self.denoising.build(b["gt_boxes"], self.pc_range, device)
+            if built is not None:
+                dn_content, dn_ref, dn_valid, dn_targets, group_size = built
+                query_content = torch.cat([match_content, dn_content], dim=1)
+                ref_points_all = torch.cat([match_ref, dn_ref], dim=1)
+                attn_mask = build_attention_mask(num_matching, group_size, self.denoising.num_groups, device)
+                dn_bundle = (dn_valid, dn_targets)
+            else:
+                query_content, ref_points_all, attn_mask = match_content, match_ref, None
+        else:
+            query_content, ref_points_all, attn_mask = match_content, match_ref, None
+
+        query_pos = ref_point_positional_embedding(ref_points_all, channels)
+        query_feat = self.decoder(query_content, query_pos, key_pad, key_pos, key_padding_mask, attn_mask)
+        pred_all = self.head(query_feat, ref_points_all)
+
+        if dn_bundle is not None:
+            dn_valid, dn_targets = dn_bundle
+            pred = {k: v[:, :num_matching] for k, v in pred_all.items()}
+            pred_dn = {k: v[:, num_matching:] for k, v in pred_all.items()}
+            return pred, b["gt_boxes"], (pred_dn, dn_valid, dn_targets)
+        return pred_all, b["gt_boxes"], None
 
     def loss(self, batch, device):
-        pred, gt_boxes_list = self.forward(batch, device)
+        pred, gt_boxes_list, dn_info = self.forward(batch, device)
         matches = self.matcher.match(pred, gt_boxes_list)
         losses = compute_detr_loss(pred, gt_boxes_list, matches, self.cfg["DETR_LOSS"])
+
+        if dn_info is not None:
+            pred_dn, dn_valid, dn_targets = dn_info
+            dn_losses = compute_denoising_loss(pred_dn, dn_targets, dn_valid, self.cfg["DETR_LOSS"])
+        else:
+            zero = pred["center"].sum() * 0.0
+            dn_losses = {"total": zero, "cls": zero, "center": zero, "size": zero, "rotation": zero}
+
+        dn_weight = self.cfg.get("DENOISING", {}).get("LOSS_WEIGHT", 1.0)
+        total = losses["total"] + dn_weight * dn_losses["total"]
+        losses = {
+            **losses, "total": total,
+            "dn_cls": dn_losses["cls"], "dn_center": dn_losses["center"],
+            "dn_size": dn_losses["size"], "dn_rotation": dn_losses["rotation"],
+        }
         return losses, pred, gt_boxes_list, matches
 
     @torch.no_grad()

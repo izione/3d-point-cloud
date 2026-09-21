@@ -60,3 +60,30 @@ def compute_detr_loss(pred: dict, gt_boxes_list: list, matches: list, loss_cfg: 
     total = (weights["cls"] * cls_loss + weights["center"] * center_loss +
              weights["size"] * size_loss + weights["rotation"] * rot_loss)
     return {"total": total, "cls": cls_loss, "center": center_loss, "size": size_loss, "rotation": rot_loss}
+
+
+def compute_denoising_loss(pred_dn: dict, targets: dict, valid_mask: torch.Tensor, loss_cfg: dict) -> dict:
+    """Loss for the query-denoising queries (models/denoising.py) -- no
+    matching needed, each denoising query's target is simply the (unnoised)
+    GT box it was built from. `valid_mask` (B,G*Mmax) marks real GT slots vs.
+    padding (samples with fewer GT boxes than that batch's max)."""
+    weights = loss_cfg["WEIGHTS"]
+    exist_target = valid_mask.float()
+    cls_loss = sigmoid_focal_loss(pred_dn["exist_logit"].squeeze(-1), exist_target,
+                                   loss_cfg.get("CLS_ALPHA", 0.25), loss_cfg.get("CLS_GAMMA", 2.0))
+
+    if valid_mask.any():
+        pred_center = pred_dn["center"][valid_mask]
+        pred_log_size = pred_dn["log_size"][valid_mask]
+        pred_R = sixd_to_matrix(pred_dn["sixd"][valid_mask])
+        center_loss = F.l1_loss(pred_center, targets["center"][valid_mask])
+        size_loss = F.l1_loss(pred_log_size, targets["log_size"][valid_mask])
+        rot_loss = matrix_geodesic_loss(pred_R, targets["rot_matrix"][valid_mask]).mean()
+    else:
+        center_loss = pred_dn["center"].sum() * 0.0
+        size_loss = pred_dn["log_size"].sum() * 0.0
+        rot_loss = pred_dn["sixd"].sum() * 0.0
+
+    total = (weights["cls"] * cls_loss + weights["center"] * center_loss +
+             weights["size"] * size_loss + weights["rotation"] * rot_loss)
+    return {"total": total, "cls": cls_loss, "center": center_loss, "size": size_loss, "rotation": rot_loss}

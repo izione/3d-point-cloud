@@ -2,7 +2,9 @@
 feed sparse tokens straight into a transformer decoder instead of first
 collapsing them into a dense BEV map). The sparse backbone + SlotFormer
 refinement that produce the tokens this decoder attends to are unchanged --
-see models/detector_detr.py for how they're wired together.
+see models/detector_detr.py for how they're wired together (including how the
+learned "matching" queries here get concatenated with the denoising queries
+built by models/denoising.py before being passed to forward()).
 
 Per-sample token counts vary (different scenes have different numbers of
 active voxels), so cross-attention needs a padded (B, T_max, C) key/value
@@ -40,9 +42,21 @@ def token_positional_embedding(coords: torch.Tensor, channels: int, pc_range: to
     PE of the token's world-space center, summed over the 3 axes (matches
     SlotFormer's own convention -- see slotformer.py's SFLayer._positional_encoding)."""
     world = pc_range[:3].to(coords.device) + (coords[:, 1:4].float() + 0.5) * effective_voxel_size.to(coords.device)
-    pe = torch.zeros(coords.shape[0], channels, device=coords.device, dtype=torch.float32)
+    return ref_point_positional_embedding(world, channels)
+
+
+def ref_point_positional_embedding(ref_points: torch.Tensor, channels: int) -> torch.Tensor:
+    """ref_points: (...,3) world coordinates -> (...,channels) sinusoidal PE,
+    summed over the 3 axes. Same primitive used for both the sparse-token keys
+    (token_positional_embedding above) and any set of query reference points
+    (matching queries' learned points, or denoising queries' noised GT
+    centers) -- a query and a key at the same world location get the same PE,
+    which is the point of encoding position this way instead of a per-slot
+    learned embedding."""
+    shape = ref_points.shape[:-1]
+    pe = torch.zeros(*shape, channels, device=ref_points.device, dtype=torch.float32)
     for axis in range(3):
-        pe = pe + sinusoidal_pe(world[:, axis], channels, PE_TEMPERATURE)
+        pe = pe + sinusoidal_pe(ref_points[..., axis].reshape(-1), channels, PE_TEMPERATURE).reshape(*shape, channels)
     return pe
 
 
@@ -60,14 +74,17 @@ class DetrDecoderLayer(nn.Module):
             nn.Linear(channels * ffn_ratio, channels),
         )
 
-    def forward(self, query, query_pos, key, key_pos, key_padding_mask):
-        # self-attention among queries (pre-norm, residual)
+    def forward(self, query, query_pos, key, key_pos, key_padding_mask, self_attn_mask=None):
+        # self-attention among queries (pre-norm, residual). self_attn_mask (if
+        # given) blocks matching<->denoising and cross-group denoising leakage
+        # -- see models/denoising.py::build_attention_mask.
         q = self.norm1(query)
         qk = q + query_pos
-        attn_out, _ = self.self_attn(qk, qk, q)
+        attn_out, _ = self.self_attn(qk, qk, q, attn_mask=self_attn_mask)
         query = query + attn_out
 
-        # cross-attention: queries -> sparse tokens
+        # cross-attention: queries -> sparse tokens (every query, matching or
+        # denoising, can freely see all of that sample's sparse tokens)
         q = self.norm2(query)
         attn_out, _ = self.cross_attn(q + query_pos, key + key_pos, key, key_padding_mask=key_padding_mask)
         query = query + attn_out
@@ -80,6 +97,7 @@ class DetrDecoder(nn.Module):
     def __init__(self, channels, num_queries, num_layers, num_heads, ffn_ratio=4):
         super().__init__()
         self.num_queries = num_queries
+        self.channels = channels
         self.query_embed = nn.Parameter(torch.randn(num_queries, channels) * 0.02)
         # learnable initial reference point per query, in [0,1]^3 (normalized
         # over the point-cloud range) via sigmoid -- keeps every query's
@@ -87,22 +105,20 @@ class DetrDecoder(nn.Module):
         self.query_ref_raw = nn.Parameter(torch.randn(num_queries, 3) * 0.5)
         self.layers = nn.ModuleList([DetrDecoderLayer(channels, num_heads, ffn_ratio) for _ in range(num_layers)])
 
-    def reference_points(self, pc_range: torch.Tensor) -> torch.Tensor:
-        """(num_queries, 3) world-space reference points."""
+    def matching_reference_points(self, pc_range: torch.Tensor) -> torch.Tensor:
+        """(num_queries, 3) world-space reference points for the learned queries."""
         norm = torch.sigmoid(self.query_ref_raw)
         return pc_range[:3] + norm * (pc_range[3:] - pc_range[:3])
 
-    def forward(self, key, key_pos, key_padding_mask, pc_range: torch.Tensor, batch_size: int):
-        """key/key_pos: (B,T_max,C). Returns (query_feat (B,Q,C), ref_points (B,Q,3))."""
-        channels = self.query_embed.shape[1]
-        query = self.query_embed[None, :, :].expand(batch_size, -1, -1).clone()
+    def matching_content(self, batch_size: int) -> torch.Tensor:
+        """(B, num_queries, C) learned content embedding, expanded per sample."""
+        return self.query_embed[None, :, :].expand(batch_size, -1, -1).clone()
 
-        ref_points = self.reference_points(pc_range)  # (Q,3), shared init across the batch
-        query_pos = torch.zeros(batch_size, self.num_queries, channels, device=key.device)
-        for axis in range(3):
-            query_pos = query_pos + sinusoidal_pe(ref_points[:, axis], channels, PE_TEMPERATURE)[None, :, :]
-
+    def forward(self, query_content, query_pos, key, key_pos, key_padding_mask, self_attn_mask=None):
+        """query_content/query_pos: (B,Q,C) -- already-built queries (matching
+        only, or matching+denoising concatenated; see models/detector_detr.py).
+        key/key_pos: (B,T_max,C). Returns query_feat (B,Q,C)."""
+        query = query_content
         for layer in self.layers:
-            query = layer(query, query_pos, key, key_pos, key_padding_mask)
-
-        return query, ref_points[None, :, :].expand(batch_size, -1, -1)
+            query = layer(query, query_pos, key, key_pos, key_padding_mask, self_attn_mask)
+        return query

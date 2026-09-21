@@ -75,6 +75,54 @@ def check_focal_loss_sane():
     print(f"[ok] sigmoid_focal_loss: confident-right={l_right.item():.4f} < confident-wrong={l_wrong.item():.4f}")
 
 
+def check_query_denoising_build():
+    from models.denoising import QueryDenoising, build_attention_mask
+
+    torch.manual_seed(0)
+    pc_range = torch.tensor([0.0, -5.0, -2.5, 12.0, 5.0, 2.5])
+    channels = 16
+
+    # sample 0 has 3 GT boxes, sample 1 has 1 -> Mmax=3, so sample 1 has 2 pad slots per group
+    gt0 = torch.zeros(3, 10); gt0[:, 3:6] = 1.0; gt0[:, 6] = 1.0
+    gt0[:, :3] = torch.tensor([[2.0, 0.0, 0.0], [5.0, -1.0, 1.0], [8.0, 2.0, -1.0]])
+    gt1 = torch.zeros(1, 10); gt1[:, 3:6] = 1.0; gt1[:, 6] = 1.0
+    gt1[:, :3] = torch.tensor([[4.0, 0.0, 0.0]])
+
+    dn = QueryDenoising(channels, num_groups=2, center_noise_scale=0.0, size_noise_scale=0.0, rot_noise_deg=0.0)
+    built = dn.build([gt0, gt1], pc_range, torch.device("cpu"))
+    assert built is not None
+    dn_content, dn_ref, dn_valid, dn_targets, m_max = built
+
+    assert m_max == 3
+    G = 2
+    assert dn_content.shape == (2, G * m_max, channels)
+    assert dn_valid.shape == (2, G * m_max)
+    # sample0: all 3 slots real in both groups; sample1: only slot 0 real per group
+    expected_valid = torch.tensor([[True, True, True] * G, [True, False, False] * G])
+    assert torch.equal(dn_valid, expected_valid), f"valid mask mismatch:\n{dn_valid}\nvs\n{expected_valid}"
+
+    # noise scales are all 0 -> the "noised" reference point must exactly equal
+    # the true GT center for every REAL slot (this isolates the noise-generation
+    # math from the learned embedding, which check_full_model_forward_backward
+    # already covers together with the rest of the model)
+    real = dn_valid
+    assert torch.allclose(dn_ref[real], dn_targets["center"][real], atol=1e-5), \
+        "with noise scale 0, noised center should exactly equal the true GT center"
+    print(f"[ok] QueryDenoising.build(): shapes correct, valid mask correct, zero-noise ref==true center")
+
+    mask = build_attention_mask(num_matching=5, group_size=m_max, num_groups=G, device=torch.device("cpu"))
+    total = 5 + G * m_max
+    assert mask.shape == (total, total)
+    # matching block (0:5) must not see any denoising block, and vice versa
+    assert (mask[:5, 5:] == float("-inf")).all()
+    assert (mask[5:, :5] == float("-inf")).all()
+    # group 0 (5:5+m_max) must not see group 1 (5+m_max:5+2*m_max)
+    g0, g1 = slice(5, 5 + m_max), slice(5 + m_max, 5 + 2 * m_max)
+    assert (mask[g0, g1] == float("-inf")).all() and (mask[g1, g0] == float("-inf")).all()
+    assert (mask[g0, g0] == 0.0).all() and (mask[:5, :5] == 0.0).all()
+    print(f"[ok] build_attention_mask(): matching/denoising and cross-group blocks correctly isolated")
+
+
 def check_full_model_forward_backward():
     """End-to-end wiring check with a synthetic batch (no real dataset needed):
     VFE -> backbone -> SlotFormer -> DETR decoder -> head -> matcher -> loss ->
@@ -140,5 +188,6 @@ if __name__ == "__main__":
     check_rotation6d_roundtrip()
     check_matcher_shapes_and_assignment()
     check_focal_loss_sane()
+    check_query_denoising_build()
     check_full_model_forward_backward()
     print("\nall DETR-component checks passed.")

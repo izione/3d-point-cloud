@@ -18,10 +18,10 @@ VFE:
                              # 10D input + per-voxel std-dev(3) + point count(1) = 14D
 
 DETR_HEAD:
-  NUM_QUERIES: 24          # max observed divers/frame in this dataset is ~4-5; generous margin.
-                            # NOT scaled up to the paper's 900 -- that number is sized for a full
-                            # driving scene, not this dataset's per-frame object count.
-  NUM_DECODER_LAYERS: 6    # matches the paper's decoder depth (was 4)
+  NUM_QUERIES: 100         # bumped from 24 -- still far below the paper's 900 (sized for a full
+                            # driving scene), but enough slack that query denoising (below) has
+                            # a real number of "empty" queries to also learn "no object" on.
+  NUM_DECODER_LAYERS: 6    # matches the paper's decoder depth
   NUM_HEADS: 4
   HIDDEN_DIM: 128          # defaults to BACKBONE.STAGE_CHANNELS[-1] (channels) if omitted
   NUM_HIDDEN_LAYERS: 1     # per-head MLP depth in models/heads_detr.py
@@ -31,6 +31,17 @@ MATCHER:
   COST_CENTER: 5.0
   COST_SIZE: 2.0
   COST_ROT: 2.0
+
+DENOISING:
+  # DN-DETR-style auxiliary queries built directly from noised GT boxes
+  # (models/denoising.py), matching the paper's own "query denoising" training
+  # trick. Training-only -- has no effect on decode()/inference.
+  ENABLED: true
+  NUM_GROUPS: 5             # independently-noised copies of each frame's GT boxes per step
+  CENTER_NOISE_SCALE: 0.4   # center jitter, as a fraction of the GT box's own half-size
+  SIZE_NOISE_SCALE: 0.4     # multiplicative size jitter fraction
+  ROT_NOISE_DEG: 15.0       # max random rotation perturbation angle
+  LOSS_WEIGHT: 1.0          # scales the denoising loss terms before adding to the matching loss's total
 
 DETR_LOSS:
   WEIGHTS:

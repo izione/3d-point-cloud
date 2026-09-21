@@ -16,7 +16,7 @@ from config_utils import load_config
 from models.detector_detr import DiverDetectorDETR
 from train import build_dataloader, save_checkpoint
 
-LOSS_KEYS = ["total", "cls", "center", "size", "rotation"]
+LOSS_KEYS = ["total", "cls", "center", "size", "rotation", "dn_cls", "dn_center", "dn_size", "dn_rotation"]
 
 
 class LossLoggerDetr:

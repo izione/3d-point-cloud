@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 
 from .vfe import VFE
+from .vfe_m import MVFE
 from .backbone3d_auto import build_backbone3d
 from .slotformer import SlotFormerBackbone
 from .decoder_detr import DetrDecoder, pad_tokens, token_positional_embedding
@@ -28,7 +29,11 @@ class DiverDetectorDETR(nn.Module):
         self.register_buffer("voxel_size", torch.tensor(voxel_size, dtype=torch.float32))
         self.grid_size = tuple(round((pc_range[3 + i] - pc_range[i]) / voxel_size[i]) for i in range(3))
 
-        self.vfe = VFE(num_filters=cfg["VFE"]["NUM_FILTERS"])
+        # SparseVoxFormer's "mVFE" (std-dev + point count on top of the base
+        # VFE, see models/vfe_m.py) by default for this variant -- set
+        # VFE.TYPE: vfe in the config to fall back to the plain base encoder.
+        vfe_cls = MVFE if cfg["VFE"].get("TYPE", "mvfe") == "mvfe" else VFE
+        self.vfe = vfe_cls(num_filters=cfg["VFE"]["NUM_FILTERS"])
         bcfg = cfg["BACKBONE"]
         self.backbone = build_backbone3d(
             self.vfe.out_channels, bcfg["STAGE_CHANNELS"], bcfg["NUM_BLOCKS_PER_STAGE"],

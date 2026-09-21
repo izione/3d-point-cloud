@@ -75,6 +75,73 @@ def check_focal_loss_sane():
     print(f"[ok] sigmoid_focal_loss: confident-right={l_right.item():.4f} < confident-wrong={l_wrong.item():.4f}")
 
 
+def check_dsvt_set_partition():
+    from models.dsvt import dynamic_set_partition
+
+    torch.manual_seed(0)
+    # two windows (window_shape=(4,4,4)): window A gets coords with x,y,z in
+    # [0,4), window B gets x in [4,8) -- everything else the same. Give window
+    # A exactly tau=5 voxels (no duplication needed) and window B 3 voxels
+    # (needs 2 duplicates to fill one set of 5).
+    coords_a = torch.tensor([[0, 0, 0, 0], [0, 1, 0, 0], [0, 2, 1, 0], [0, 3, 2, 1], [0, 1, 3, 3]])
+    coords_b = torch.tensor([[0, 5, 0, 0], [0, 6, 1, 0], [0, 7, 2, 1]])
+    coords = torch.cat([coords_a, coords_b], dim=0)  # indices 0-4 = window A, 5-7 = window B
+    tau = 5
+
+    set_idx = dynamic_set_partition(coords, window_shape=(4, 4, 4), tau=tau, x_major=True)
+    assert set_idx.shape == (2, tau), f"expected 2 sets of {tau}, got {set_idx.shape}"
+
+    # every set's tau indices must all belong to the SAME window (sets never cross window boundaries)
+    window_of = torch.tensor([0] * 5 + [1] * 3)
+    for row in set_idx:
+        windows_in_row = window_of[row].unique()
+        assert windows_in_row.numel() == 1, f"a set mixed voxels from windows {windows_in_row.tolist()}"
+
+    # every real voxel (0..7) must appear at least once across the whole partition
+    covered = torch.unique(set_idx.reshape(-1))
+    assert torch.equal(covered, torch.arange(8)), f"not all voxels covered: got {covered.tolist()}"
+
+    # window A had exactly tau=5 voxels -> its set should be a PERMUTATION of
+    # {0,1,2,3,4} with no duplicates at all
+    row_a = [r for r in set_idx if window_of[r].unique().item() == 0][0]
+    assert torch.equal(torch.sort(row_a).values, torch.arange(5)), \
+        f"window A (exactly tau voxels) should need no duplication, got {row_a.tolist()}"
+    print(f"[ok] dynamic_set_partition: window isolation, full coverage, "
+          f"and no-duplication-when-exact all correct")
+
+
+def check_dsvt_layer_and_backbone():
+    from models.dsvt import DSVTLayer, DSVTBackbone
+
+    torch.manual_seed(0)
+    channels = 16
+    n = 37
+    coords = torch.stack([
+        torch.zeros(n, dtype=torch.long),
+        torch.randint(0, 20, (n,)), torch.randint(0, 20, (n,)), torch.randint(0, 10, (n,)),
+    ], dim=1)
+    features = torch.randn(n, channels, requires_grad=True)
+    pc_range = torch.tensor([0.0, -5.0, -2.5, 12.0, 5.0, 2.5])
+    eff_voxel_size = torch.tensor([0.4, 0.4, 0.4])
+
+    layer = DSVTLayer(channels, num_heads=4, tau=8, x_major=True)
+    out = layer(features, coords, window_shape=(6, 6, 10), pc_range=pc_range, effective_voxel_size=eff_voxel_size)
+    assert out.shape == (n, channels) and torch.isfinite(out).all()
+    out.sum().backward()
+    assert features.grad is not None and torch.isfinite(features.grad).all()
+    print(f"[ok] DSVTLayer: shape preserved, finite output, gradients flow to input features")
+
+    backbone = DSVTBackbone(channels, window_shapes=[(6, 6, 10), (10, 8, 10)], tau=8, num_blocks=4, num_heads=4)
+    features2 = torch.randn(n, channels, requires_grad=True)
+    out2 = backbone(features2, coords, pc_range, eff_voxel_size)
+    assert out2.shape == (n, channels) and torch.isfinite(out2).all()
+    out2.sum().backward()
+    n_params_with_grad = sum(1 for p in backbone.parameters() if p.grad is not None)
+    n_params = sum(1 for p in backbone.parameters())
+    assert n_params_with_grad == n_params, f"only {n_params_with_grad}/{n_params} DSVTBackbone params got gradients"
+    print(f"[ok] DSVTBackbone (4 blocks, hybrid windows): shape preserved, all {n_params} params got gradients")
+
+
 def check_query_denoising_build():
     from models.denoising import QueryDenoising, build_attention_mask
 
@@ -188,6 +255,8 @@ if __name__ == "__main__":
     check_rotation6d_roundtrip()
     check_matcher_shapes_and_assignment()
     check_focal_loss_sane()
+    check_dsvt_set_partition()
+    check_dsvt_layer_and_backbone()
     check_query_denoising_build()
     check_full_model_forward_backward()
     print("\nall DETR-component checks passed.")

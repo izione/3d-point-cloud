@@ -26,6 +26,24 @@ DETR_HEAD:
   HIDDEN_DIM: 128          # defaults to BACKBONE.STAGE_CHANNELS[-1] (channels) if omitted
   NUM_HIDDEN_LAYERS: 1     # per-head MLP depth in models/heads_detr.py
 
+REFINEMENT:
+  # Sparse-token refinement stage run after the backbone, before the DETR
+  # decoder. SparseVoxFormer's own paper uses DSVT (models/dsvt.py) here for
+  # its Deep Fusion Module -- switch TYPE to slotformer to fall back to this
+  # codebase's pre-existing SlotFormerBackbone (a different paper, FSHNet)
+  # for comparison; SLOTFORMER's own config section below is then read instead.
+  TYPE: dsvt
+  # Window shapes in BACKBONE-OUTPUT voxel units (effective voxel size 0.4m at
+  # this config's grid). Post-backbone grid is ~(30,25,13); z stays fully
+  # covered by both windows (13) rather than collapsed to 1, matching the
+  # paper's own DFM usage (window_shape=[24,24,11] -- they don't flatten z
+  # either). Two shapes alternate per block ("hybrid window design").
+  WINDOW_SHAPES: [[10, 10, 13], [15, 13, 13]]
+  TAU: 32              # max voxels per set (paper: 36 for their pillar variant, 48 for voxel --
+                        # picked lower since this dataset's voxels are far sparser than outdoor LiDAR)
+  NUM_BLOCKS: 4         # matches the paper's Waymo-pillar depth (2 layers/block = 8 attention layers total)
+  NUM_HEADS: 4
+
 MATCHER:
   COST_CLS: 1.0
   COST_CENTER: 5.0

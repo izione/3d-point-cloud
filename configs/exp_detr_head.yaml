@@ -1,0 +1,28 @@
+# DETR-style set-prediction head (models/detector_detr.py), on the exact same
+# trunk (DATA/VFE/BACKBONE/SLOTFORMER/OPTIMIZATION) as configs/default.yaml --
+# only the head after SlotFormer differs, so results are comparable directly
+# against the dense CenterPoint-style head's baseline (precision~0.68/recall
+# ~0.71, see default.yaml's own comments) without any other confound.
+BASE_CONFIG: default.yaml
+
+DETR_HEAD:
+  NUM_QUERIES: 24          # max observed divers/frame in this dataset is ~4-5; generous margin
+  NUM_DECODER_LAYERS: 4
+  NUM_HEADS: 4
+  HIDDEN_DIM: 128          # defaults to BACKBONE.STAGE_CHANNELS[-1] (channels) if omitted
+  NUM_HIDDEN_LAYERS: 1     # per-head MLP depth in models/heads_detr.py
+
+MATCHER:
+  COST_CLS: 1.0
+  COST_CENTER: 5.0
+  COST_SIZE: 2.0
+  COST_ROT: 2.0
+
+DETR_LOSS:
+  WEIGHTS:
+    cls: 1.0
+    center: 2.0
+    size: 1.0
+    rotation: 1.0
+  CLS_ALPHA: 0.25          # standard RetinaNet/DETR focal-loss defaults (hard 0/1 target,
+  CLS_GAMMA: 2.0            # not this repo's heatmap-style FOCAL_ALPHA/BETA -- see losses_detr.py)

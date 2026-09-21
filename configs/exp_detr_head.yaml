@@ -51,3 +51,18 @@ DETR_LOSS:
     rotation: 1.0
   CLS_ALPHA: 0.25          # standard RetinaNet/DETR focal-loss defaults (hard 0/1 target,
   CLS_GAMMA: 2.0            # not this repo's heatmap-style FOCAL_ALPHA/BETA -- see losses_detr.py)
+
+OPTIMIZATION:
+  # default.yaml's BATCH_SIZE=64/LR=0.048 were tuned for the DENSE head's
+  # per-voxel conv cost on an RTX 2070 -- confirmed (2026-09-21 Colab run) that
+  # BATCH_SIZE=64 OOMs within a few steps on a 14.56GiB T4 with this DETR head,
+  # even on the pure-PyTorch backbone fallback. The decoder's cross-attention
+  # costs O(B x T_max x Q) memory per layer (T_max = that batch's largest
+  # active-token count, Q = NUM_QUERIES + denoising queries) -- a fundamentally
+  # different profile from the dense head's conv, so its batch size doesn't
+  # transfer. Retune upward only after checking real headroom on your GPU (the
+  # notebook's step 5 speed/memory check) -- this is a conservative starting
+  # point, not a measured optimum.
+  BATCH_SIZE: 8
+  LR: 0.006                # linear-scaled from default.yaml's own anchor (LR=0.003 at BATCH_SIZE=4)
+  NUM_WORKERS: 2            # matches the "suggested max workers" warning on a 2-CPU-core Colab instance

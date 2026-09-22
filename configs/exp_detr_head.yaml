@@ -32,12 +32,12 @@ REFINEMENT:
   # codebase's pre-existing SlotFormerBackbone (a different paper, FSHNet)
   # for comparison; SLOTFORMER's own config section below is then read instead.
   TYPE: dsvt
-  # Window shapes in BACKBONE-OUTPUT voxel units (effective voxel size 0.4m at
-  # this config's grid). Post-backbone grid is ~(30,25,13); z stays fully
-  # covered by both windows (13) rather than collapsed to 1, matching the
-  # paper's own DFM usage (window_shape=[24,24,11] -- they don't flatten z
-  # either). Two shapes alternate per block ("hybrid window design").
-  WINDOW_SHAPES: [[10, 10, 13], [15, 13, 13]]
+  # Window shape in BACKBONE-OUTPUT voxel units (effective voxel size 0.4m at
+  # this config's grid) -- 10x10x10 voxels = a 4m cube. Single shape (not
+  # hybrid) for now, applied to every block. z is still not collapsed to 1
+  # (grid's own z extent is only ~13, so a 10-deep window already covers
+  # most of it), matching the paper's own DFM usage of not flattening z either.
+  WINDOW_SHAPES: [[10, 10, 10]]
   TAU: 32              # max voxels per set (paper: 36 for their pillar variant, 48 for voxel --
                         # picked lower since this dataset's voxels are far sparser than outdoor LiDAR)
   NUM_BLOCKS: 4         # matches the paper's Waymo-pillar depth (2 layers/block = 8 attention layers total)

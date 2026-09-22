@@ -136,9 +136,12 @@ class DiverDetectorDETR(nn.Module):
             sf_feat = self.slot_backbone(bb_feat, bb_coords) if self.use_slotformer else bb_feat
 
         channels = sf_feat.shape[1]
-        key_pad, key_padding_mask = pad_tokens(sf_feat, bb_coords[:, 0], b["batch_size"])
         pos = token_positional_embedding(bb_coords, channels, self.pc_range, eff_voxel_size)
-        key_pos, _ = pad_tokens(pos, bb_coords[:, 0], b["batch_size"])
+        # pad_tokens' sort/scatter bookkeeping only depends on bb_coords[:, 0] (identical for
+        # feat and pos), so pad both in one call by concatenating along the channel dim first
+        # instead of redoing that bookkeeping twice.
+        padded_both, key_padding_mask = pad_tokens(torch.cat([sf_feat, pos], dim=1), bb_coords[:, 0], b["batch_size"])
+        key_pad, key_pos = padded_both[..., :channels], padded_both[..., channels:]
 
         num_matching = self.decoder.num_queries
         match_content = self.decoder.matching_content(b["batch_size"])

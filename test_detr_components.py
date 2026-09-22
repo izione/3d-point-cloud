@@ -274,6 +274,27 @@ def check_point_attention_vfe():
     print(f"[ok] PointAttentionVFE: point-transformer(64D) -> cross-attention pooling -> output shape ({num_voxels},128) matches voxel count, all {n_total} params got gradients")
 
 
+def check_pad_tokens_empty_sample():
+    from models.decoder_detr import pad_tokens
+
+    torch.manual_seed(0)
+    # sample 1 contributes ZERO tokens (e.g. a sonar frame with no in-range
+    # points -- SonarDiverDataset/collate_fn can produce this): pad_tokens
+    # must not leave an all-True mask row, or downstream attention NaNs.
+    feat = torch.randn(5, 4)
+    batch_idx = torch.tensor([0, 0, 2, 2, 2])
+    padded, mask = pad_tokens(feat, batch_idx, batch_size=3)
+
+    assert (~mask).any(dim=1).all(), f"a fully-masked row exists: {mask}"
+
+    # exercise this through the actual attention op that motivated the fix
+    mha = torch.nn.MultiheadAttention(4, 2, batch_first=True)
+    q = torch.randn(3, 1, 4)
+    out, _ = mha(q, padded, padded, key_padding_mask=mask)
+    assert torch.isfinite(out).all(), f"attention output has NaN/inf despite the pad_tokens fix: {out}"
+    print("[ok] pad_tokens: a zero-token sample no longer produces an all-masked row (attention output stays finite)")
+
+
 def check_query_denoising_build():
     from models.denoising import QueryDenoising, build_attention_mask
 
@@ -394,6 +415,7 @@ if __name__ == "__main__":
     check_cap_points_per_voxel()
     check_voxel_pooling_attention()
     check_point_attention_vfe()
+    check_pad_tokens_empty_sample()
     check_query_denoising_build()
     check_full_model_forward_backward()
     print("\nall DETR-component checks passed.")

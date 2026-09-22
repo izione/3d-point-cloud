@@ -20,7 +20,16 @@ PE_TEMPERATURE = 10000
 
 def pad_tokens(features: torch.Tensor, batch_idx: torch.Tensor, batch_size: int):
     """features: (N,C), batch_idx: (N,) which sample each token belongs to.
-    Returns (padded (B,T_max,C), key_padding_mask (B,T_max) bool, True=pad)."""
+    Returns (padded (B,T_max,C), key_padding_mask (B,T_max) bool, True=pad).
+
+    A sample with ZERO tokens (e.g. a sonar frame with no in-range points --
+    SonarDiverDataset/collate_fn can produce this) would otherwise get an
+    all-True mask row; nn.MultiheadAttention's softmax over an all-masked row
+    is NaN (confirmed: every value in that row is -inf before softmax), which
+    then poisons that whole training step's loss via the batch-wide mean.
+    Fixed by leaving slot 0 unmasked for any such sample -- it's still zeros
+    (harmless, already-zero-initialized `padded`), just no longer *entirely*
+    masked, so attention over it returns 0 instead of NaN."""
     device = features.device
     counts = torch.bincount(batch_idx, minlength=batch_size)
     t_max = max(int(counts.max().item()), 1)
@@ -32,6 +41,7 @@ def pad_tokens(features: torch.Tensor, batch_idx: torch.Tensor, batch_size: int)
     padded = torch.zeros(batch_size, t_max, features.shape[1], device=device, dtype=features.dtype)
     mask = torch.ones(batch_size, t_max, dtype=torch.bool, device=device)  # True = padding
     padded[sorted_idx, within] = features[order]
+    mask[counts == 0, 0] = False  # avoid an all-True (empty-softmax/NaN) row for zero-token samples
     mask[sorted_idx, within] = False
     return padded, mask
 

@@ -65,6 +65,55 @@ def check_matcher_shapes_and_assignment():
     print(f"[ok] compute_detr_loss: total={losses['total'].item():.4f} (all terms finite, backward() ran clean)")
 
 
+def check_combined_layer_matching_equivalence():
+    """detector_detr.py's loss() now matches all decoder layers (final +
+    auxiliary) in ONE HungarianMatcher.match() call by stacking them into a
+    bigger batch, instead of one match() call per layer -- purely a
+    performance change to cut GPU<->CPU sync round-trips (see
+    HungarianMatcher.match()'s docstring: a real training run slowed ~3.8x
+    once the auxiliary loss added 6x as many of these calls per step).
+    Confirms the optimization is actually equivalent: matching each layer
+    separately must give the exact same per-layer assignments as matching
+    the stacked batch and slicing the result back apart."""
+    from models.matcher import HungarianMatcher
+
+    torch.manual_seed(0)
+    B, Q = 3, 6
+    num_layers = 4
+
+    def rand_pred():
+        return {
+            "exist_logit": torch.randn(B, Q, 1),
+            "center": torch.randn(B, Q, 3) * 5,
+            "log_size": torch.randn(B, Q, 3) * 0.2,
+            "sixd": torch.tensor([1., 0, 0, 0, 1, 0]).expand(B, Q, 6).clone(),
+        }
+
+    layer_preds = [rand_pred() for _ in range(num_layers)]
+    gt0 = torch.zeros(2, 10); gt0[:, 3:6] = 1.0; gt0[:, 6] = 1.0; gt0[:, :3] = torch.randn(2, 3) * 5
+    gt1 = torch.zeros(0, 10)  # empty-GT sample, mixed in with non-empty ones
+    gt2 = torch.zeros(1, 10); gt2[:, 3:6] = 1.0; gt2[:, 6] = 1.0; gt2[:, :3] = torch.randn(1, 3) * 5
+    gt_boxes_list = [gt0, gt1, gt2]
+
+    matcher = HungarianMatcher()
+
+    separate = [matcher.match(p, gt_boxes_list) for p in layer_preds]  # old behavior: one call per layer
+
+    stacked_pred = {k: torch.cat([p[k] for p in layer_preds], dim=0) for k in layer_preds[0]}
+    stacked_matches = matcher.match(stacked_pred, gt_boxes_list * num_layers)  # new behavior: one combined call
+    combined = [stacked_matches[i * B:(i + 1) * B] for i in range(num_layers)]
+
+    for layer_idx in range(num_layers):
+        for b in range(B):
+            q_sep, g_sep = separate[layer_idx][b]
+            q_comb, g_comb = combined[layer_idx][b]
+            assert torch.equal(q_sep, q_comb) and torch.equal(g_sep, g_comb), \
+                (f"layer {layer_idx} sample {b}: separate={(q_sep.tolist(), g_sep.tolist())} "
+                 f"!= combined={(q_comb.tolist(), g_comb.tolist())}")
+    print(f"[ok] combined-layer matching: {num_layers} layers x {B} samples give identical assignments "
+          f"whether matched separately per layer or as one stacked batch")
+
+
 def check_focal_loss_sane():
     logit_confident_right = torch.tensor([5.0, -5.0])
     logit_confident_wrong = torch.tensor([-5.0, 5.0])
@@ -494,6 +543,7 @@ def check_full_model_forward_backward():
 if __name__ == "__main__":
     check_rotation6d_roundtrip()
     check_matcher_shapes_and_assignment()
+    check_combined_layer_matching_equivalence()
     check_focal_loss_sane()
     check_dsvt_set_partition()
     check_dsvt_layer_and_backbone()

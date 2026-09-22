@@ -189,7 +189,26 @@ class DiverDetectorDETR(nn.Module):
 
     def loss(self, batch, device):
         pred, gt_boxes_list, dn_info, (aux_preds, aux_preds_dn) = self.forward(batch, device)
-        matches = self.matcher.match(pred, gt_boxes_list)
+
+        # Match every decoder layer (final + auxiliary) in ONE matcher call
+        # instead of one call per layer. HungarianMatcher.match() already
+        # queues a whole call's cost-matrix GPU kernels before doing any CPU
+        # sync; stacking all layers into a single call extends that batching
+        # across layers too, so the whole step does one queue-then-sync round
+        # trip instead of NUM_DECODER_LAYERS of them -- this loop used to be
+        # the dominant cost of adding the auxiliary loss (a real training run
+        # slowed ~3.8x, traced to exactly this).
+        all_layer_preds = [pred] + aux_preds
+        batch_size = pred["exist_logit"].shape[0]
+        if len(all_layer_preds) > 1:
+            stacked_pred = {k: torch.cat([p[k] for p in all_layer_preds], dim=0) for k in pred}
+            stacked_matches = self.matcher.match(stacked_pred, gt_boxes_list * len(all_layer_preds))
+            per_layer_matches = [stacked_matches[i * batch_size:(i + 1) * batch_size]
+                                  for i in range(len(all_layer_preds))]
+        else:
+            per_layer_matches = [self.matcher.match(pred, gt_boxes_list)]
+        matches = per_layer_matches[0]
+
         losses = compute_detr_loss(pred, gt_boxes_list, matches, self.cfg["DETR_LOSS"])
 
         if dn_info is not None:
@@ -202,14 +221,10 @@ class DiverDetectorDETR(nn.Module):
         dn_weight = self.cfg.get("DENOISING", {}).get("LOSS_WEIGHT", 1.0)
         total = losses["total"] + dn_weight * dn_losses["total"]
 
-        # Auxiliary loss: independently re-run the matcher + loss for every
-        # earlier decoder layer's output too (standard DETR trick, see
-        # DetrDecoder.forward()'s docstring). Each layer gets its own
-        # Hungarian assignment since its predictions differ from the final
-        # layer's -- same as the paper's own auxiliary loss.
+        # Auxiliary loss: same per-layer loss recipe as the final layer, using
+        # the matches already computed above for each earlier decoder layer.
         aux_weight = self.cfg["DETR_LOSS"].get("AUX_LOSS_WEIGHT", 1.0)
-        for aux_pred in aux_preds:
-            aux_matches = self.matcher.match(aux_pred, gt_boxes_list)
+        for aux_pred, aux_matches in zip(aux_preds, per_layer_matches[1:]):
             aux_losses = compute_detr_loss(aux_pred, gt_boxes_list, aux_matches, self.cfg["DETR_LOSS"])
             total = total + aux_weight * aux_losses["total"]
         if aux_preds_dn is not None:

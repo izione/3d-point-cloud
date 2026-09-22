@@ -15,8 +15,10 @@ import models.slotformer as slotformer
 from config_utils import load_config
 from models.detector_detr import DiverDetectorDETR
 from train import build_dataloader, save_checkpoint
+from test import iou_matrix, pr_curve_for_threshold
 
 LOSS_KEYS = ["total", "cls", "center", "size", "rotation", "dn_cls", "dn_center", "dn_size", "dn_rotation"]
+AP_IOU_THRESHOLD = 0.5
 
 
 class LossLoggerDetr:
@@ -31,15 +33,15 @@ class LossLoggerDetr:
         self.file = open(self.path, "a", newline="")
         self.writer = csv.writer(self.file)
         if is_new:
-            self.writer.writerow(["phase", "epoch", "step", "lr", "n_pos"] + LOSS_KEYS)
+            self.writer.writerow(["phase", "epoch", "step", "lr", "n_pos"] + LOSS_KEYS + ["ap50"])
             self.file.flush()
 
     def log_train_step(self, epoch, step, losses, lr, n_pos):
-        self.writer.writerow(["train", epoch, step, lr, n_pos] + [losses[k].item() for k in LOSS_KEYS])
+        self.writer.writerow(["train", epoch, step, lr, n_pos] + [losses[k].item() for k in LOSS_KEYS] + [""])
         self.file.flush()
 
-    def log_val_epoch(self, epoch, step, avg_losses):
-        self.writer.writerow(["val", epoch, step, "", ""] + [avg_losses[k] for k in LOSS_KEYS])
+    def log_val_epoch(self, epoch, step, avg_losses, ap50):
+        self.writer.writerow(["val", epoch, step, "", ""] + [avg_losses[k] for k in LOSS_KEYS] + [ap50])
         self.file.flush()
 
     def close(self):
@@ -48,17 +50,32 @@ class LossLoggerDetr:
 
 @torch.no_grad()
 def run_validation(model, val_loader, device):
+    """Reuses the same forward pass model.loss() already ran for the val-loss
+    terms to also decode + collect each frame's det x GT IoU matrix (test.py's
+    pr_curve_for_threshold expects), so AP@0.5 costs no extra forward passes --
+    only decode()'s (cheap, per-query threshold) and axis_aligned_iou_3d's
+    (closed-form) overhead on top of validation that already ran every epoch."""
     model.eval()
     sums = {k: 0.0 for k in LOSS_KEYS}
     n = 0
+    frame_data, total_gt = [], 0
     for batch in val_loader:
-        losses, _, _, _ = model.loss(batch, device)
+        losses, pred, gt_boxes_list, _ = model.loss(batch, device)
         for k in LOSS_KEYS:
             sums[k] += losses[k].item()
         n += 1
+
+        dets = model.decode(pred, score_threshold=0.0)
+        for b, gt_boxes in enumerate(gt_boxes_list):
+            gt_boxes = gt_boxes.cpu()
+            det = dets[b]
+            total_gt += gt_boxes.shape[0]
+            frame_data.append({"scores": det["score"], "ious": iou_matrix(det, gt_boxes)})
     model.train()
     n = max(n, 1)
-    return {k: v / n for k, v in sums.items()}
+    avg_losses = {k: v / n for k, v in sums.items()}
+    _, _, ap50 = pr_curve_for_threshold(frame_data, total_gt, AP_IOU_THRESHOLD)
+    return avg_losses, ap50
 
 
 def main():
@@ -150,9 +167,10 @@ def main():
 
         epoch_time = time.time() - epoch_t0
         avg_train_loss = running_loss / max(len(train_loader), 1)
-        val_losses = run_validation(model, val_loader, device)
-        logger.log_val_epoch(epoch, global_step, val_losses)
-        print(f"epoch {epoch}: train_loss={avg_train_loss:.4f} val_loss={val_losses['total']:.4f} time={epoch_time:.1f}s")
+        val_losses, val_ap50 = run_validation(model, val_loader, device)
+        logger.log_val_epoch(epoch, global_step, val_losses, val_ap50)
+        print(f"epoch {epoch}: train_loss={avg_train_loss:.4f} val_loss={val_losses['total']:.4f} "
+              f"val_AP@{AP_IOU_THRESHOLD:.1f}={val_ap50:.4f} time={epoch_time:.1f}s")
 
         if ckpt_every_epochs and (epoch + 1) % ckpt_every_epochs == 0:
             save_checkpoint(ckpt_dir / f"{exp_name}_epoch_{epoch}.pth", model, optimizer, scheduler, epoch, global_step, cfg, epoch_complete=True)

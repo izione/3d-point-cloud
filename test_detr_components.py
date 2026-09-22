@@ -197,6 +197,53 @@ def check_point_transformer_layer():
     print(f"[ok] PointTransformerBlock (residual): shape preserved, all {n_total} params got gradients")
 
 
+def check_cap_points_per_voxel():
+    from models.voxel_pool_attn import cap_points_per_voxel
+
+    torch.manual_seed(0)
+    # voxel 0: 155 points (the real batch's observed outlier), voxel 1: 2 points (median),
+    # voxel 2: 1 point (must never be fully dropped)
+    counts = [155, 2, 1]
+    point_voxel_idx = torch.cat([torch.full((c,), i, dtype=torch.long) for i, c in enumerate(counts)])
+    n_total_before = point_voxel_idx.shape[0]
+
+    keep = cap_points_per_voxel(point_voxel_idx, num_voxels=3, max_points=32)
+    kept_voxel_idx = point_voxel_idx[keep]
+    kept_counts = torch.bincount(kept_voxel_idx, minlength=3)
+
+    assert kept_counts[0].item() == 32, f"voxel 0 (155 pts) should be capped to 32, got {kept_counts[0].item()}"
+    assert kept_counts[1].item() == 2, f"voxel 1 (2 pts, under cap) should keep all 2, got {kept_counts[1].item()}"
+    assert kept_counts[2].item() == 1, f"voxel 2 (1 pt) must never be fully dropped, got {kept_counts[2].item()}"
+    assert keep.unique().numel() == keep.numel(), "cap_points_per_voxel returned duplicate indices"
+    print(f"[ok] cap_points_per_voxel: {n_total_before} points -> kept {keep.numel()} "
+          f"(voxel counts capped to [32, 2, 1] as expected, no duplicates)")
+
+
+def check_voxel_pooling_attention():
+    from models.voxel_pool_attn import VoxelPoolingAttention
+
+    torch.manual_seed(0)
+    channels, out_channels = 16, 32
+    # 3 voxels: one with a single point (edge case -- fully-real, zero-pad row
+    # except it's the ONLY entry, so mask has T_max-1 True's for that row),
+    # one with a handful, one with many.
+    counts = [1, 4, 9]
+    point_voxel_idx = torch.cat([torch.full((c,), i, dtype=torch.long) for i, c in enumerate(counts)])
+    feat = torch.randn(sum(counts), channels, requires_grad=True)
+
+    pool = VoxelPoolingAttention(channels, out_channels, num_heads=4)
+    out = pool(feat, point_voxel_idx, num_voxels=3)
+    assert out.shape == (3, out_channels) and torch.isfinite(out).all(), \
+        "VoxelPoolingAttention output has wrong shape or non-finite values (possible all-masked-row NaN)"
+    out.sum().backward()
+    assert feat.grad is not None and torch.isfinite(feat.grad).all()
+    n_grad = sum(1 for p in pool.parameters() if p.grad is not None)
+    n_total = sum(1 for p in pool.parameters())
+    assert n_grad == n_total, f"only {n_grad}/{n_total} VoxelPoolingAttention params got gradients"
+    print(f"[ok] VoxelPoolingAttention: handles 1/4/9-point voxels (no all-masked-row NaN), "
+          f"output shape (3,{out_channels}), all {n_total} params got gradients")
+
+
 def check_point_attention_vfe():
     from models.vfe_point_attn import PointAttentionVFE
 
@@ -224,7 +271,7 @@ def check_point_attention_vfe():
     n_grad = sum(1 for p in vfe.parameters() if p.grad is not None)
     n_total = sum(1 for p in vfe.parameters())
     assert n_grad == n_total, f"only {n_grad}/{n_total} PointAttentionVFE params got gradients"
-    print(f"[ok] PointAttentionVFE: point-transformer(64D) -> FCN+maxpool -> output shape ({num_voxels},128) matches voxel count, all {n_total} params got gradients")
+    print(f"[ok] PointAttentionVFE: point-transformer(64D) -> cross-attention pooling -> output shape ({num_voxels},128) matches voxel count, all {n_total} params got gradients")
 
 
 def check_query_denoising_build():
@@ -344,6 +391,8 @@ if __name__ == "__main__":
     check_dsvt_layer_and_backbone()
     check_knn_indices_per_sample()
     check_point_transformer_layer()
+    check_cap_points_per_voxel()
+    check_voxel_pooling_attention()
     check_point_attention_vfe()
     check_query_denoising_build()
     check_full_model_forward_backward()

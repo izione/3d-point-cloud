@@ -18,9 +18,8 @@ VFE:
                              # 10D input + per-voxel std-dev(3) + point count(1) = 14D
 
 DETR_HEAD:
-  NUM_QUERIES: 100         # bumped from 24 -- still far below the paper's 900 (sized for a full
-                            # driving scene), but enough slack that query denoising (below) has
-                            # a real number of "empty" queries to also learn "no object" on.
+  NUM_QUERIES: 10          # working assumption: at most 10 objects/frame (max observed so far is
+                            # ~4-5 divers/frame; this leaves some margin without going back to 100).
   NUM_DECODER_LAYERS: 6    # matches the paper's decoder depth
   NUM_HEADS: 4
   HIDDEN_DIM: 128          # defaults to BACKBONE.STAGE_CHANNELS[-1] (channels) if omitted

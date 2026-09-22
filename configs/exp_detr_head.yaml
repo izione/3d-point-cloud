@@ -68,6 +68,10 @@ DETR_LOSS:
     rotation: 1.0
   CLS_ALPHA: 0.25          # standard RetinaNet/DETR focal-loss defaults (hard 0/1 target,
   CLS_GAMMA: 2.0            # not this repo's heatmap-style FOCAL_ALPHA/BETA -- see losses_detr.py)
+  AUX_LOSS_WEIGHT: 1.0      # weight on each of the 5 earlier decoder layers' own matcher+loss
+                            # (original DETR's own ablation: dropping this significantly slows
+                            # convergence -- confirmed here too: center/size loss plateaued for
+                            # 10+ epochs without it, see models/detector_detr.py::loss())
 
 OPTIMIZATION:
   # default.yaml's BATCH_SIZE=64/LR=0.048 were tuned for the DENSE head's

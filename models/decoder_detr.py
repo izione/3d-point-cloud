@@ -124,11 +124,25 @@ class DetrDecoder(nn.Module):
         """(B, num_queries, C) learned content embedding, expanded per sample."""
         return self.query_embed[None, :, :].expand(batch_size, -1, -1).clone()
 
-    def forward(self, query_content, query_pos, key, key_pos, key_padding_mask, self_attn_mask=None):
+    def forward(self, query_content, query_pos, key, key_pos, key_padding_mask, self_attn_mask=None,
+                return_intermediate=False):
         """query_content/query_pos: (B,Q,C) -- already-built queries (matching
         only, or matching+denoising concatenated; see models/detector_detr.py).
-        key/key_pos: (B,T_max,C). Returns query_feat (B,Q,C)."""
+        key/key_pos: (B,T_max,C). Returns query_feat (B,Q,C) by default.
+
+        return_intermediate=True additionally returns every layer's output
+        (including the last) as a list -- used for DETR's per-layer auxiliary
+        loss: supervising only the final layer leaves early layers/backbone
+        getting gradient through the full decoder stack, which in practice
+        stalled box regression (center/size loss flat for 10+ epochs) while
+        classification and rotation still moved -- see
+        models/detector_detr.py::loss()."""
         query = query_content
+        intermediate = []
         for layer in self.layers:
             query = layer(query, query_pos, key, key_pos, key_padding_mask, self_attn_mask)
+            if return_intermediate:
+                intermediate.append(query)
+        if return_intermediate:
+            return query, intermediate
         return query

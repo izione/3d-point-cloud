@@ -274,6 +274,93 @@ def check_point_attention_vfe():
     print(f"[ok] PointAttentionVFE: point-transformer(64D) -> cross-attention pooling -> output shape ({num_voxels},128) matches voxel count, all {n_total} params got gradients")
 
 
+def check_decoder_return_intermediate():
+    from models.decoder_detr import DetrDecoder, ref_point_positional_embedding
+
+    torch.manual_seed(0)
+    B, Q, T, C, L = 2, 4, 7, 16, 6
+    decoder = DetrDecoder(C, num_queries=Q, num_layers=L, num_heads=4)
+    query_content = decoder.matching_content(B)
+    ref_points = decoder.matching_reference_points(torch.tensor([0., -5., -2.5, 12., 5., 2.5]))
+    ref_points = ref_points[None].expand(B, -1, -1)
+    query_pos = ref_point_positional_embedding(ref_points, C)
+    key = torch.randn(B, T, C)
+    key_pos = torch.randn(B, T, C)
+    key_padding_mask = torch.zeros(B, T, dtype=torch.bool)
+
+    final_only = decoder(query_content, query_pos, key, key_pos, key_padding_mask)
+    final_again, intermediate = decoder(query_content, query_pos, key, key_pos, key_padding_mask,
+                                         return_intermediate=True)
+    assert len(intermediate) == L, f"expected {L} intermediate layer outputs, got {len(intermediate)}"
+    assert all(t.shape == (B, Q, C) for t in intermediate)
+    # same weights, same inputs -> the two calls' final layer output must match exactly
+    assert torch.allclose(final_only, final_again), "return_intermediate changed the final output"
+    assert torch.allclose(final_again, intermediate[-1]), "intermediate[-1] should equal the returned final query"
+    # earlier layers must actually differ from the final one (not e.g. all aliasing the same tensor)
+    assert not torch.allclose(intermediate[0], intermediate[-1]), "layer outputs should differ across depth"
+    print(f"[ok] DetrDecoder return_intermediate: {L} layer outputs, shapes correct, "
+          f"final output unchanged, layers are actually distinct")
+
+
+def check_auxiliary_loss_strengthens_early_layer_gradient():
+    """The bug this fixes: only the last decoder layer got a loss, so
+    center/size regression plateaued for 10+ epochs in a real training run.
+    A weaker "gradient exists at layer 0" check wouldn't actually prove this
+    fix does anything -- backprop through a stacked decoder already sends
+    SOME gradient to every layer even with only the last layer supervised.
+    The real, testable claim is that supervising every layer makes that
+    gradient reaching the FIRST layer stronger. Denoising is disabled here
+    (its noise sampling is stochastic) so the two forward passes being
+    compared are otherwise identical and the comparison isn't confounded."""
+    from config_utils import load_config
+    from models.detector_detr import DiverDetectorDETR
+
+    torch.manual_seed(0)
+    cfg = load_config("configs/exp_detr_head.yaml")
+    cfg = {**cfg, "DENOISING": {**cfg.get("DENOISING", {}), "ENABLED": False}}
+    model = DiverDetectorDETR(cfg)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    model = model.to(device)
+    model.train()
+
+    pc_range = cfg["DATA"]["POINT_CLOUD_RANGE"]
+
+    def rand_points(n):
+        pts = torch.rand(n, 4)
+        pts[:, 0] = pc_range[0] + pts[:, 0] * (pc_range[3] - pc_range[0])
+        pts[:, 1] = pc_range[1] + pts[:, 1] * (pc_range[4] - pc_range[1])
+        pts[:, 2] = pc_range[2] + pts[:, 2] * (pc_range[5] - pc_range[2])
+        return pts
+
+    gt0 = torch.zeros(2, 10); gt0[:, 3:6] = 1.0; gt0[:, 6] = 1.0
+    gt0[:, :3] = rand_points(2)[:, :3]
+    batch = {
+        "points": rand_points(300),
+        "point_batch_idx": torch.zeros(300, dtype=torch.long),
+        "gt_boxes": [gt0],
+        "frame_ids": ["synthetic_0"],
+        "batch_size": 1,
+    }
+
+    first_layer_param = next(model.decoder.layers[0].parameters())
+
+    def grad_norm_at_layer0():
+        model.zero_grad()
+        losses, _, _, _ = model.loss(batch, device)
+        losses["total"].backward()
+        return first_layer_param.grad.norm().item()
+
+    grad_with_aux = grad_norm_at_layer0()
+    model.cfg["DETR_LOSS"]["AUX_LOSS_WEIGHT"] = 0.0  # reproduces the old final-layer-only behavior
+    grad_final_only = grad_norm_at_layer0()
+
+    assert grad_with_aux > grad_final_only, \
+        (f"expected auxiliary loss to strengthen decoder layer 0's gradient, "
+         f"got {grad_with_aux:.4f} (with aux) <= {grad_final_only:.4f} (final-layer-only)")
+    print(f"[ok] auxiliary loss strengthens decoder layer 0's gradient: "
+          f"{grad_final_only:.4f} (final-layer-only) -> {grad_with_aux:.4f} (with aux)")
+
+
 def check_pad_tokens_empty_sample():
     from models.decoder_detr import pad_tokens
 
@@ -415,6 +502,8 @@ if __name__ == "__main__":
     check_cap_points_per_voxel()
     check_voxel_pooling_attention()
     check_point_attention_vfe()
+    check_decoder_return_intermediate()
+    check_auxiliary_loss_strengthens_early_layer_gradient()
     check_pad_tokens_empty_sample()
     check_query_denoising_build()
     check_full_model_forward_backward()

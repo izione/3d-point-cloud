@@ -32,7 +32,7 @@ def collect_pr_data(model, loader, device):
     frame_data = []
     total_gt = 0
     for batch in loader:
-        pred, gt_boxes_list, _ = model.forward(batch, device)
+        pred, gt_boxes_list, _, _ = model.forward(batch, device)
         dets = model.decode(pred, score_threshold=0.0)
         for b, gt_boxes in enumerate(gt_boxes_list):
             gt_boxes = gt_boxes.cpu()
@@ -50,7 +50,7 @@ def evaluate(model, loader, device, score_threshold):
     per_frame = []
 
     for batch in loader:
-        pred, gt_boxes_list, _ = model.forward(batch, device)
+        pred, gt_boxes_list, _, _ = model.forward(batch, device)
         dets = model.decode(pred, score_threshold=score_threshold)
 
         for b, gt_boxes in enumerate(gt_boxes_list):

@@ -32,6 +32,14 @@ class DiverDetectorDETR(nn.Module):
     denoising, so forward()'s dn_info is always None and pred is exactly the
     matching queries' output -- decode()/test_detr.py don't need to know
     denoising exists at all.
+
+    forward() returns (pred, gt_boxes_list, dn_info, aux_info): aux_info is
+    (aux_preds, aux_preds_dn), the same-shaped prediction dicts for every
+    decoder layer BEFORE the last one (aux_preds_dn is None when dn_info is
+    None). loss() runs the matcher+loss independently on each of these too --
+    see its docstring comment for why this auxiliary supervision is needed.
+    Callers that only want the final prediction (decode(), test_detr.py) can
+    ignore aux_info entirely.
     """
 
     def __init__(self, cfg):
@@ -162,18 +170,25 @@ class DiverDetectorDETR(nn.Module):
             query_content, ref_points_all, attn_mask = match_content, match_ref, None
 
         query_pos = ref_point_positional_embedding(ref_points_all, channels)
-        query_feat = self.decoder(query_content, query_pos, key_pad, key_pos, key_padding_mask, attn_mask)
-        pred_all = self.head(query_feat, ref_points_all)
+        # return_intermediate=True gets every decoder layer's output (not just
+        # the last) so loss() can apply an auxiliary loss at each one -- see
+        # DetrDecoder.forward()'s docstring for why.
+        _, intermediate = self.decoder(query_content, query_pos, key_pad, key_pos, key_padding_mask, attn_mask,
+                                        return_intermediate=True)
+        all_preds = [self.head(feat, ref_points_all) for feat in intermediate]
+        pred_all = all_preds[-1]
 
         if dn_bundle is not None:
             dn_valid, dn_targets = dn_bundle
             pred = {k: v[:, :num_matching] for k, v in pred_all.items()}
             pred_dn = {k: v[:, num_matching:] for k, v in pred_all.items()}
-            return pred, b["gt_boxes"], (pred_dn, dn_valid, dn_targets)
-        return pred_all, b["gt_boxes"], None
+            aux_preds = [{k: v[:, :num_matching] for k, v in p.items()} for p in all_preds[:-1]]
+            aux_preds_dn = [{k: v[:, num_matching:] for k, v in p.items()} for p in all_preds[:-1]]
+            return pred, b["gt_boxes"], (pred_dn, dn_valid, dn_targets), (aux_preds, aux_preds_dn)
+        return pred_all, b["gt_boxes"], None, (all_preds[:-1], None)
 
     def loss(self, batch, device):
-        pred, gt_boxes_list, dn_info = self.forward(batch, device)
+        pred, gt_boxes_list, dn_info, (aux_preds, aux_preds_dn) = self.forward(batch, device)
         matches = self.matcher.match(pred, gt_boxes_list)
         losses = compute_detr_loss(pred, gt_boxes_list, matches, self.cfg["DETR_LOSS"])
 
@@ -186,6 +201,22 @@ class DiverDetectorDETR(nn.Module):
 
         dn_weight = self.cfg.get("DENOISING", {}).get("LOSS_WEIGHT", 1.0)
         total = losses["total"] + dn_weight * dn_losses["total"]
+
+        # Auxiliary loss: independently re-run the matcher + loss for every
+        # earlier decoder layer's output too (standard DETR trick, see
+        # DetrDecoder.forward()'s docstring). Each layer gets its own
+        # Hungarian assignment since its predictions differ from the final
+        # layer's -- same as the paper's own auxiliary loss.
+        aux_weight = self.cfg["DETR_LOSS"].get("AUX_LOSS_WEIGHT", 1.0)
+        for aux_pred in aux_preds:
+            aux_matches = self.matcher.match(aux_pred, gt_boxes_list)
+            aux_losses = compute_detr_loss(aux_pred, gt_boxes_list, aux_matches, self.cfg["DETR_LOSS"])
+            total = total + aux_weight * aux_losses["total"]
+        if aux_preds_dn is not None:
+            for aux_pred_dn in aux_preds_dn:
+                aux_dn_losses = compute_denoising_loss(aux_pred_dn, dn_targets, dn_valid, self.cfg["DETR_LOSS"])
+                total = total + aux_weight * dn_weight * aux_dn_losses["total"]
+
         losses = {
             **losses, "total": total,
             "dn_cls": dn_losses["cls"], "dn_center": dn_losses["center"],

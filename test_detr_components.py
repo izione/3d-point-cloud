@@ -142,6 +142,91 @@ def check_dsvt_layer_and_backbone():
     print(f"[ok] DSVTBackbone (4 blocks, hybrid windows): shape preserved, all {n_params} params got gradients")
 
 
+def check_knn_indices_per_sample():
+    from models.point_transformer import knn_indices_per_sample
+
+    torch.manual_seed(0)
+    # sample 0: 5 points on a line at x=0,1,2,3,4 (y=z=0) -- exact NN order is obvious.
+    # sample 1: a single cluster far away, fewer points than k to exercise the pad-by-repeat path.
+    pos_a = torch.stack([torch.arange(5).float(), torch.zeros(5), torch.zeros(5)], dim=1)
+    pos_b = torch.tensor([[100., 0, 0], [100.1, 0, 0], [100.2, 0, 0]])
+    pos = torch.cat([pos_a, pos_b], dim=0)
+    batch_idx = torch.tensor([0, 0, 0, 0, 0, 1, 1, 1])
+
+    knn = knn_indices_per_sample(pos, batch_idx, batch_size=2, k=3)
+    assert knn.shape == (8, 3)
+
+    # no cross-sample leakage: every neighbor index for a sample-0 point must itself be a sample-0 point
+    for i in range(5):
+        assert batch_idx[knn[i]].eq(0).all(), f"point {i} (sample 0) got a neighbor from another sample: {knn[i].tolist()}"
+    for i in range(5, 8):
+        assert batch_idx[knn[i]].eq(1).all(), f"point {i} (sample 1) got a neighbor from another sample: {knn[i].tolist()}"
+
+    # point 0 (x=0) 's 3 nearest on the line x=0..4 must be {0,1,2} (itself + the two closest)
+    assert set(knn[0].tolist()) == {0, 1, 2}, f"expected {{0,1,2}}, got {knn[0].tolist()}"
+    # point 2 (x=2, in the middle) 's 3 nearest must be {1,2,3}
+    assert set(knn[2].tolist()) == {1, 2, 3}, f"expected {{1,2,3}}, got {knn[2].tolist()}"
+    print(f"[ok] knn_indices_per_sample: no cross-sample leakage, correct nearest-neighbor sets, pad-by-repeat path ran clean")
+
+
+def check_point_transformer_layer():
+    from models.point_transformer import PointTransformerLayer, PointTransformerBlock, knn_indices_per_sample
+
+    torch.manual_seed(0)
+    n, channels, k = 40, 16, 8
+    pos = torch.rand(n, 3) * 5
+    batch_idx = torch.zeros(n, dtype=torch.long)
+    knn_idx = knn_indices_per_sample(pos, batch_idx, batch_size=1, k=k)
+
+    x = torch.randn(n, channels, requires_grad=True)
+    layer = PointTransformerLayer(channels)
+    out = layer(x, pos, knn_idx)
+    assert out.shape == (n, channels) and torch.isfinite(out).all()
+    out.sum().backward()
+    assert x.grad is not None and torch.isfinite(x.grad).all()
+    print(f"[ok] PointTransformerLayer: shape preserved, finite, gradients flow to input")
+
+    x2 = torch.randn(n, channels, requires_grad=True)
+    block = PointTransformerBlock(channels)
+    out2 = block(x2, pos, knn_idx)
+    assert out2.shape == (n, channels) and torch.isfinite(out2).all()
+    out2.sum().backward()
+    n_grad = sum(1 for p in block.parameters() if p.grad is not None)
+    n_total = sum(1 for p in block.parameters())
+    assert n_grad == n_total, f"only {n_grad}/{n_total} PointTransformerBlock params got gradients"
+    print(f"[ok] PointTransformerBlock (residual): shape preserved, all {n_total} params got gradients")
+
+
+def check_point_attention_vfe():
+    from models.vfe_point_attn import PointAttentionVFE
+
+    torch.manual_seed(0)
+    pc_range = torch.tensor([0.0, -5.0, -2.5, 12.0, 5.0, 2.5])
+    voxel_size = torch.tensor([0.2, 0.2, 0.2])
+
+    # two samples' worth of points, already voxelized (reuse the real voxelize_batch)
+    from data.dataset import voxelize_batch
+    n0, n1 = 150, 90
+    points = torch.rand(n0 + n1, 4)
+    points[:, 0] = pc_range[0] + points[:, 0] * (pc_range[3] - pc_range[0])
+    points[:, 1] = pc_range[1] + points[:, 1] * (pc_range[4] - pc_range[1])
+    points[:, 2] = pc_range[2] + points[:, 2] * (pc_range[5] - pc_range[2])
+    point_batch_idx = torch.cat([torch.zeros(n0, dtype=torch.long), torch.ones(n1, dtype=torch.long)])
+    grid_size = torch.tensor([round(((pc_range[3 + i] - pc_range[i]) / voxel_size[i]).item()) for i in range(3)])
+    voxel_coords, point_voxel_idx = voxelize_batch(points, point_batch_idx, pc_range, voxel_size, grid_size)
+    num_voxels = voxel_coords.shape[0]
+
+    vfe = PointAttentionVFE(out_channels=32, num_blocks=1, k=16)
+    points.requires_grad_(True)
+    out = vfe(points, point_voxel_idx, voxel_coords, num_voxels, pc_range, voxel_size, point_batch_idx, batch_size=2)
+    assert out.shape == (num_voxels, 32) and torch.isfinite(out).all()
+    out.sum().backward()
+    n_grad = sum(1 for p in vfe.parameters() if p.grad is not None)
+    n_total = sum(1 for p in vfe.parameters())
+    assert n_grad == n_total, f"only {n_grad}/{n_total} PointAttentionVFE params got gradients"
+    print(f"[ok] PointAttentionVFE: output shape ({num_voxels},32) matches voxel count, all {n_total} params got gradients")
+
+
 def check_query_denoising_build():
     from models.denoising import QueryDenoising, build_attention_mask
 
@@ -257,6 +342,9 @@ if __name__ == "__main__":
     check_focal_loss_sane()
     check_dsvt_set_partition()
     check_dsvt_layer_and_backbone()
+    check_knn_indices_per_sample()
+    check_point_transformer_layer()
+    check_point_attention_vfe()
     check_query_denoising_build()
     check_full_model_forward_backward()
     print("\nall DETR-component checks passed.")

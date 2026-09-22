@@ -3,6 +3,7 @@ import torch.nn as nn
 
 from .vfe import VFE
 from .vfe_m import MVFE
+from .vfe_point_attn import PointAttentionVFE
 from .backbone3d_auto import build_backbone3d
 from .slotformer import SlotFormerBackbone
 from .dsvt import DSVTBackbone
@@ -42,11 +43,20 @@ class DiverDetectorDETR(nn.Module):
         self.register_buffer("voxel_size", torch.tensor(voxel_size, dtype=torch.float32))
         self.grid_size = tuple(round((pc_range[3 + i] - pc_range[i]) / voxel_size[i]) for i in range(3))
 
-        # SparseVoxFormer's "mVFE" (std-dev + point count on top of the base
-        # VFE, see models/vfe_m.py) by default for this variant -- set
-        # VFE.TYPE: vfe in the config to fall back to the plain base encoder.
-        vfe_cls = MVFE if cfg["VFE"].get("TYPE", "mvfe") == "mvfe" else VFE
-        self.vfe = vfe_cls(num_filters=cfg["VFE"]["NUM_FILTERS"])
+        # Point-to-voxel feature extraction: SparseVoxFormer's "mVFE" (std-dev
+        # + point count on top of the base VFE, models/vfe_m.py) by default;
+        # VFE.TYPE: vfe falls back to the plain base encoder; VFE.TYPE:
+        # point_attn instead refines points via Point Transformer local
+        # self-attention before pooling (models/vfe_point_attn.py) -- needs
+        # point_batch_idx/batch_size at call time (see forward()), unlike the
+        # other two, since its k-NN search must not cross a sample boundary.
+        self.vfe_type = cfg["VFE"].get("TYPE", "mvfe")
+        if self.vfe_type == "point_attn":
+            pcfg = cfg["VFE"].get("POINT_ATTN", {})
+            self.vfe = PointAttentionVFE(cfg["VFE"]["NUM_FILTERS"][-1], pcfg.get("NUM_BLOCKS", 1), pcfg.get("K", 16))
+        else:
+            vfe_cls = MVFE if self.vfe_type == "mvfe" else VFE
+            self.vfe = vfe_cls(num_filters=cfg["VFE"]["NUM_FILTERS"])
         bcfg = cfg["BACKBONE"]
         self.backbone = build_backbone3d(
             self.vfe.out_channels, bcfg["STAGE_CHANNELS"], bcfg["NUM_BLOCKS_PER_STAGE"],
@@ -98,6 +108,7 @@ class DiverDetectorDETR(nn.Module):
         voxel_coords, point_voxel_idx = voxelize_batch(points, point_batch_idx, self.pc_range, self.voxel_size, torch.tensor(self.grid_size, device=device))
         return {
             "points": points,
+            "point_batch_idx": point_batch_idx,
             "point_voxel_idx": point_voxel_idx,
             "voxel_coords": voxel_coords,
             "gt_boxes": [g.to(device) for g in batch["gt_boxes"]],
@@ -107,7 +118,11 @@ class DiverDetectorDETR(nn.Module):
     def forward(self, batch, device):
         b = self._to_device(batch, device)
         num_voxels = b["voxel_coords"].shape[0]
-        vfe_out = self.vfe(b["points"], b["point_voxel_idx"], b["voxel_coords"], num_voxels, self.pc_range, self.voxel_size)
+        if self.vfe_type == "point_attn":
+            vfe_out = self.vfe(b["points"], b["point_voxel_idx"], b["voxel_coords"], num_voxels, self.pc_range,
+                                self.voxel_size, b["point_batch_idx"], b["batch_size"])
+        else:
+            vfe_out = self.vfe(b["points"], b["point_voxel_idx"], b["voxel_coords"], num_voxels, self.pc_range, self.voxel_size)
         index_grid = build_index_grid(b["voxel_coords"], b["batch_size"], self.grid_size, device=device)
         bb_feat, bb_coords, _, _ = self.backbone(vfe_out, b["voxel_coords"], index_grid, self.grid_size, b["batch_size"])
         eff_voxel_size = self.voxel_size * self.stem_stride

@@ -53,7 +53,10 @@ class DiverDetectorDETR(nn.Module):
         self.vfe_type = cfg["VFE"].get("TYPE", "mvfe")
         if self.vfe_type == "point_attn":
             pcfg = cfg["VFE"].get("POINT_ATTN", {})
-            self.vfe = PointAttentionVFE(cfg["VFE"]["NUM_FILTERS"][-1], pcfg.get("NUM_BLOCKS", 1), pcfg.get("K", 16))
+            self.vfe = PointAttentionVFE(
+                pcfg.get("OUT_CHANNELS", 128), pcfg.get("POINT_CHANNELS", 64),
+                pcfg.get("NUM_BLOCKS", 1), pcfg.get("K", 16),
+            )
         else:
             vfe_cls = MVFE if self.vfe_type == "mvfe" else VFE
             self.vfe = vfe_cls(num_filters=cfg["VFE"]["NUM_FILTERS"])

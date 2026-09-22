@@ -216,15 +216,15 @@ def check_point_attention_vfe():
     voxel_coords, point_voxel_idx = voxelize_batch(points, point_batch_idx, pc_range, voxel_size, grid_size)
     num_voxels = voxel_coords.shape[0]
 
-    vfe = PointAttentionVFE(out_channels=32, num_blocks=1, k=16)
+    vfe = PointAttentionVFE(out_channels=128, point_channels=64, num_blocks=1, k=16)
     points.requires_grad_(True)
     out = vfe(points, point_voxel_idx, voxel_coords, num_voxels, pc_range, voxel_size, point_batch_idx, batch_size=2)
-    assert out.shape == (num_voxels, 32) and torch.isfinite(out).all()
+    assert out.shape == (num_voxels, 128) and torch.isfinite(out).all()
     out.sum().backward()
     n_grad = sum(1 for p in vfe.parameters() if p.grad is not None)
     n_total = sum(1 for p in vfe.parameters())
     assert n_grad == n_total, f"only {n_grad}/{n_total} PointAttentionVFE params got gradients"
-    print(f"[ok] PointAttentionVFE: output shape ({num_voxels},32) matches voxel count, all {n_total} params got gradients")
+    print(f"[ok] PointAttentionVFE: point-transformer(64D) -> FCN+maxpool -> output shape ({num_voxels},128) matches voxel count, all {n_total} params got gradients")
 
 
 def check_query_denoising_build():

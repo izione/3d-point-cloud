@@ -58,6 +58,12 @@ def build_backbone3d(in_channels, stage_channels, num_blocks_per_stage, down_ker
               f"block_dilations={block_dilations}")
         return Sparse3DBackbone(in_channels, stage_channels, num_blocks_per_stage, down_kernel, down_stride,
                                  block_dilations=block_dilations, norm_type=norm_type)
+    if backbone_type == "sparse_unet":
+        from .backbone3d_unet import SparseUNetBackbone
+        print(f"3D backbone: pure-PyTorch, {len(stage_channels)}-stage U-Net (FCAF3D-style encoder-decoder "
+              f"with skip connections, models/backbone3d_unet.py), net stride={down_stride}")
+        return SparseUNetBackbone(in_channels, stage_channels, num_blocks_per_stage, down_kernel, down_stride,
+                                   block_dilations=block_dilations, norm_type=norm_type)
     if backbone_type == "sparse_down_slot_up":
         from .backbone3d_down_slot_up import SparseDownSlotUpBackbone
         bcfg = bcfg or {}
@@ -112,7 +118,7 @@ def build_backbone3d(in_channels, stage_channels, num_blocks_per_stage, down_ker
     if backbone_type not in ("auto", None):
         raise ValueError(
             f"unknown BACKBONE.TYPE: {backbone_type!r} "
-            f"(expected 'auto', 'dense', 'sparse_dilated_gn', 'sparse_down_slot_up', "
+            f"(expected 'auto', 'dense', 'sparse_dilated_gn', 'sparse_unet', 'sparse_down_slot_up', "
             f"'sparse_slot_stages', 'sparse_slot_unet', or 'sparse_slot_light_unet')"
         )
     if spconv_usable():

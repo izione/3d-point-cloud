@@ -17,6 +17,22 @@ VFE:
   TYPE: mvfe                # SparseVoxFormer's "mVFE" (models/vfe_m.py): base VFE's
                              # 10D input + per-voxel std-dev(3) + point count(1) = 14D
 
+BACKBONE:
+  # FCAF3D-style (arXiv 2112.00322) encoder-decoder backbone instead of
+  # default.yaml's single down-conv+resblocks stage -- see
+  # models/backbone3d_unet.py for why this doesn't need FCAF3D's own
+  # generative-conv+pruning neck machinery. 2 encoder stages (128 then 256
+  # channels, stride 2 each = total encoder stride 4) + 1 decoder stage that
+  # upsamples the 256-channel level back into the 128-channel skip
+  # connection -- net total_stride stays 2, same as default.yaml's single
+  # stage, so REFINEMENT's effective-voxel-size-tuned settings below don't
+  # need retuning. Keeps full 3D (x,y,z) sparse coords throughout, no BEV.
+  TYPE: sparse_unet
+  STAGE_CHANNELS: [128, 256]
+  NUM_BLOCKS_PER_STAGE: 3
+  DOWNSAMPLE_KERNEL: 3
+  DOWNSAMPLE_STRIDE: 2
+
 DETR_HEAD:
   NUM_QUERIES: 10          # working assumption: at most 10 objects/frame (max observed so far is
                             # ~4-5 divers/frame; this leaves some margin without going back to 100).

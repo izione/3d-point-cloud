@@ -465,6 +465,62 @@ def check_matching_query_size_rotation_anchors():
           "head output equals anchor when the correction MLP is zeroed, gradients reach the anchor")
 
 
+def check_sparse_unet_backbone():
+    """FCAF3D-motivated encoder-decoder backbone (models/backbone3d_unet.py):
+    confirms the net stride is down_stride (not down_stride^num_stages --
+    the decoder deliberately stops one level short, see the module's
+    docstring), output channels match the shallowest stage, coords/features
+    are finite, and gradients reach every stage (encoder AND decoder,
+    including the skip-connection path)."""
+    from models.backbone3d_unet import SparseUNetBackbone
+    from models.sparse_ops import build_index_grid, SparseConv3dDown
+
+    torch.manual_seed(0)
+    in_channels, stage_channels = 8, [16, 32]
+    down_stride = 2
+    n = 200
+    grid_size = (20, 20, 10)  # plain int tuple -- matches how detector_detr.py builds self.grid_size
+    coords = torch.stack([
+        torch.zeros(n, dtype=torch.long),
+        torch.randint(0, grid_size[0], (n,)),
+        torch.randint(0, grid_size[1], (n,)),
+        torch.randint(0, grid_size[2], (n,)),
+    ], dim=1)
+    coords = torch.unique(coords, dim=0)  # voxelization never produces duplicate coords
+    features = torch.randn(coords.shape[0], in_channels, requires_grad=True)
+    index_grid = build_index_grid(coords, batch_size=1, grid_size=grid_size)
+
+    backbone = SparseUNetBackbone(in_channels, stage_channels, num_blocks_per_stage=2,
+                                   down_kernel=3, down_stride=down_stride)
+    assert backbone.total_stride == down_stride, \
+        f"expected net stride {down_stride} (decoder stops one level short), got {backbone.total_stride}"
+    assert backbone.out_channels == stage_channels[0]
+
+    out_feat, out_coords, out_index_grid, out_grid_size = backbone(features, coords, index_grid, grid_size, batch_size=1)
+    assert out_feat.shape[1] == stage_channels[0]
+    assert torch.isfinite(out_feat).all()
+    # net stride is ONE downsample's worth (the decoder restores back to the
+    # second encoder stage's own input resolution) -- computed via the same
+    # formula the backbone itself uses, not re-derived independently, so this
+    # actually checks the decoder landed on the right level rather than just
+    # agreeing with a coincidentally-matching separate formula.
+    padding = 3 // 2
+    expected_grid_size = SparseConv3dDown.output_grid_size(grid_size, kernel_size=3, stride=down_stride, padding=padding)
+    assert tuple(out_grid_size) == tuple(expected_grid_size), \
+        f"output grid_size {tuple(out_grid_size)} doesn't match net stride {down_stride} over input grid {grid_size} " \
+        f"(expected {tuple(expected_grid_size)})"
+
+    out_feat.sum().backward()
+    assert features.grad is not None and torch.isfinite(features.grad).all(), \
+        "gradients didn't reach the backbone's input features"
+    n_grad = sum(1 for p in backbone.parameters() if p.grad is not None and torch.isfinite(p.grad).all())
+    n_total = sum(1 for p in backbone.parameters())
+    assert n_grad == n_total, f"only {n_grad}/{n_total} SparseUNetBackbone params got gradients"
+    print(f"[ok] SparseUNetBackbone: net stride={backbone.total_stride} (not down_stride^{len(stage_channels)}), "
+          f"out_channels={backbone.out_channels}, output grid {tuple(out_grid_size)}, "
+          f"all {n_total} params got gradients including input")
+
+
 def check_pad_tokens_empty_sample():
     from models.decoder_detr import pad_tokens
 
@@ -618,6 +674,7 @@ if __name__ == "__main__":
     check_point_attention_vfe()
     check_decoder_return_intermediate()
     check_matching_query_size_rotation_anchors()
+    check_sparse_unet_backbone()
     check_auxiliary_loss_strengthens_early_layer_gradient()
     check_pad_tokens_empty_sample()
     check_query_denoising_build()

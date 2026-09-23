@@ -59,6 +59,11 @@ def build_backbone3d(in_channels, stage_channels, num_blocks_per_stage, down_ker
         return Sparse3DBackbone(in_channels, stage_channels, num_blocks_per_stage, down_kernel, down_stride,
                                  block_dilations=block_dilations, norm_type=norm_type)
     if backbone_type == "sparse_unet":
+        if spconv_usable():
+            from .backbone3d_unet_spconv import SparseUNetBackboneSpconv
+            print(f"3D backbone: spconv, {len(stage_channels)}-stage U-Net (FCAF3D-style encoder-decoder "
+                  f"with skip connections, models/backbone3d_unet_spconv.py), net stride={down_stride}")
+            return SparseUNetBackboneSpconv(in_channels, stage_channels, num_blocks_per_stage, down_kernel, down_stride)
         from .backbone3d_unet import SparseUNetBackbone
         print(f"3D backbone: pure-PyTorch, {len(stage_channels)}-stage U-Net (FCAF3D-style encoder-decoder "
               f"with skip connections, models/backbone3d_unet.py), net stride={down_stride}")

@@ -521,6 +521,81 @@ def check_sparse_unet_backbone():
           f"all {n_total} params got gradients including input")
 
 
+def check_sparse_unet_backbone_spconv():
+    """spconv-backed twin of check_sparse_unet_backbone -- same architecture,
+    but using spconv's native indice_key-based paired inverse conv for the
+    decoder instead of sparse_ops.py's custom pure-PyTorch one (see
+    backbone3d_unet_spconv.py's docstring). The real risk here is the
+    indice_key plumbing: if a decoder stage's SparseInverseConv3d is wired to
+    the wrong encoder stage's down-conv, spconv won't necessarily error --
+    it'll just silently restore to the wrong coordinate set. Confirms the
+    decoder's output coordinates exactly equal that skip level's own
+    coordinate set (computed independently via the same down-conv module),
+    not just "some finite output happened". Skipped when spconv/CUDA isn't
+    available on this machine."""
+    from models.backbone3d_auto import spconv_usable
+    if not spconv_usable():
+        print("[skip] SparseUNetBackboneSpconv: spconv not usable on this machine")
+        return
+
+    import spconv.pytorch as spconv
+    from models.backbone3d_unet_spconv import SparseUNetBackboneSpconv
+    from models.sparse_ops import build_index_grid, SparseConv3dDown
+
+    torch.manual_seed(0)
+    device = torch.device("cuda")
+    in_channels, stage_channels = 8, [16, 32]
+    down_stride = 2
+    n = 200
+    grid_size = (20, 20, 10)
+    coords = torch.stack([
+        torch.zeros(n, dtype=torch.long),
+        torch.randint(0, grid_size[0], (n,)),
+        torch.randint(0, grid_size[1], (n,)),
+        torch.randint(0, grid_size[2], (n,)),
+    ], dim=1)
+    coords = torch.unique(coords, dim=0).to(device)
+    features = torch.randn(coords.shape[0], in_channels, device=device, requires_grad=True)
+    index_grid = build_index_grid(coords, batch_size=1, grid_size=grid_size, device=device)
+
+    backbone = SparseUNetBackboneSpconv(in_channels, stage_channels, num_blocks_per_stage=2,
+                                         down_kernel=3, down_stride=down_stride).to(device)
+    assert backbone.total_stride == down_stride
+    assert backbone.out_channels == stage_channels[0]
+
+    # independently compute what encoder_stages[0]'s OWN down-conv produces as
+    # its output coordinate set -- with 2 encoder stages there's exactly one
+    # decoder stage, and this is exactly the skip level it should land x back on.
+    with torch.no_grad():
+        probe_x = spconv.SparseConvTensor(features.detach().clone(), coords.to(torch.int32), list(grid_size), 1)
+        probe_out = backbone.encoder_stages[0].down(probe_x)
+    expected_skip_coords = probe_out.indices.long()
+
+    out_feat, out_coords, out_index_grid, out_grid_size = backbone(features, coords, index_grid, grid_size, batch_size=1)
+    assert out_feat.shape[1] == stage_channels[0]
+    assert torch.isfinite(out_feat).all()
+
+    padding = 3 // 2
+    expected_grid_size = SparseConv3dDown.output_grid_size(grid_size, kernel_size=3, stride=down_stride, padding=padding)
+    assert tuple(out_grid_size) == tuple(expected_grid_size), \
+        f"output grid_size {tuple(out_grid_size)} != expected {tuple(expected_grid_size)}"
+
+    out_set = {tuple(c.tolist()) for c in out_coords}
+    expected_set = {tuple(c.tolist()) for c in expected_skip_coords}
+    assert out_set == expected_set, \
+        (f"decoder's output coords don't match the skip level's own coordinate set -- indice_key wiring is "
+         f"likely wrong. {len(out_set - expected_set)} extra, {len(expected_set - out_set)} missing")
+
+    out_feat.sum().backward()
+    assert features.grad is not None and torch.isfinite(features.grad).all()
+    n_grad = sum(1 for p in backbone.parameters() if p.grad is not None and torch.isfinite(p.grad).all())
+    n_total = sum(1 for p in backbone.parameters())
+    assert n_grad == n_total, f"only {n_grad}/{n_total} SparseUNetBackboneSpconv params got gradients"
+    print(f"[ok] SparseUNetBackboneSpconv: net stride={backbone.total_stride}, out_channels={backbone.out_channels}, "
+          f"decoder output coords exactly match the skip level's coordinate set ({len(out_set)} voxels), "
+          f"all {n_total} params got gradients including input")
+
+
 def check_pad_tokens_empty_sample():
     from models.decoder_detr import pad_tokens
 
@@ -675,6 +750,7 @@ if __name__ == "__main__":
     check_decoder_return_intermediate()
     check_matching_query_size_rotation_anchors()
     check_sparse_unet_backbone()
+    check_sparse_unet_backbone_spconv()
     check_auxiliary_loss_strengthens_early_layer_gradient()
     check_pad_tokens_empty_sample()
     check_query_denoising_build()

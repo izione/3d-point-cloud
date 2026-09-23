@@ -14,8 +14,19 @@ DATA:
   POINT_CLOUD_RANGE: [0.0, -5.0, -2.5, 12.0, 5.0, 2.5]
 
 VFE:
-  TYPE: mvfe                # SparseVoxFormer's "mVFE" (models/vfe_m.py): base VFE's
-                             # 10D input + per-voxel std-dev(3) + point count(1) = 14D
+  # PointAttentionVFE (models/vfe_point_attn.py): k=16 nearest-neighbor
+  # Point Transformer self-attention refines each point using its 16 nearest
+  # neighbors (measured cheaper than a radius query on this dataset -- see
+  # point_transformer.py), then a learned cross-attention query pools each
+  # voxel's (now-refined) points into its voxel-wise feature -- instead of
+  # mVFE's plain per-point MLP + max-pool. Benchmark experiment: replaces
+  # mVFE (VFE.TYPE: mvfe) as this config's VFE.
+  TYPE: point_attn
+  POINT_ATTN:
+    OUT_CHANNELS: 128
+    POINT_CHANNELS: 64
+    NUM_BLOCKS: 1
+    K: 16
 
 BACKBONE:
   # FCAF3D-style (arXiv 2112.00322) encoder-decoder backbone instead of

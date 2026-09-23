@@ -35,11 +35,17 @@ class SetPredictionHead(nn.Module):
         self.log_size_head = mlp(3)
         self.rot_head = mlp(6)
 
-    def forward(self, query_feat: torch.Tensor, ref_points: torch.Tensor) -> dict:
-        """query_feat/ref_points: (B,Q,C)/(B,Q,3)."""
+    def forward(self, query_feat: torch.Tensor, ref_points: torch.Tensor,
+                log_size_anchor: torch.Tensor, rot_anchor: torch.Tensor) -> dict:
+        """query_feat: (B,Q,C). ref_points/log_size_anchor/rot_anchor: (B,Q,3)/(B,Q,3)/(B,Q,6)
+        -- per-query anchors (matching queries: DetrDecoder's learned
+        parameters; denoising queries: that query's own noised box, see
+        models/denoising.py) that each head predicts a correction from,
+        instead of size/rotation being regressed as an absolute value with no
+        reference point the way center already wasn't."""
         return {
             "exist_logit": self.exist_head(query_feat),               # (B,Q,1)
             "center": ref_points + self.center_offset_head(query_feat),  # (B,Q,3), absolute world coords
-            "log_size": self.log_size_head(query_feat),               # (B,Q,3)
-            "sixd": self.rot_head(query_feat),                        # (B,Q,6)
+            "log_size": log_size_anchor + self.log_size_head(query_feat),  # (B,Q,3)
+            "sixd": rot_anchor + self.rot_head(query_feat),           # (B,Q,6)
         }

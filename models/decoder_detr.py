@@ -113,12 +113,40 @@ class DetrDecoder(nn.Module):
         # over the point-cloud range) via sigmoid -- keeps every query's
         # starting guess inside the actual scene volume regardless of init scale.
         self.query_ref_raw = nn.Parameter(torch.randn(num_queries, 3) * 0.5)
+        # learnable initial log-size / 6D-rotation anchor per query, added to
+        # that head's raw output the same way query_ref_raw is added to the
+        # center offset (see heads_detr.py::SetPredictionHead.forward()).
+        # Without this, a matching query's size head had NO reference to
+        # correct from -- it had to predict absolute log-size from scratch --
+        # and empirically never learned anything: a real 20-epoch run's size
+        # loss matched a trivial "always predict the dataset's mean size"
+        # baseline the entire time. Denoising queries never had this problem
+        # since their content embedding already encodes a noised size/rotation
+        # to correct (models/denoising.py); this gives matching queries the
+        # same kind of starting point. Small random init (not zero) so
+        # different queries can specialize, same reasoning as query_embed's
+        # own init. Rotation anchor starts at identity ([1,0,0,0,1,0] is the
+        # sixd encoding of the identity matrix -- see rotation6d.py) plus a
+        # small perturbation for the same reason.
+        self.size_anchor_raw = nn.Parameter(torch.randn(num_queries, 3) * 0.1)
+        self.rot_anchor_raw = nn.Parameter(
+            torch.tensor([1., 0., 0., 0., 1., 0.]).expand(num_queries, 6).clone()
+            + torch.randn(num_queries, 6) * 0.1
+        )
         self.layers = nn.ModuleList([DetrDecoderLayer(channels, num_heads, ffn_ratio) for _ in range(num_layers)])
 
     def matching_reference_points(self, pc_range: torch.Tensor) -> torch.Tensor:
         """(num_queries, 3) world-space reference points for the learned queries."""
         norm = torch.sigmoid(self.query_ref_raw)
         return pc_range[:3] + norm * (pc_range[3:] - pc_range[:3])
+
+    def matching_log_size_anchor(self) -> torch.Tensor:
+        """(num_queries, 3) learned log-size anchor for the learned queries."""
+        return self.size_anchor_raw
+
+    def matching_rotation_anchor(self) -> torch.Tensor:
+        """(num_queries, 6) learned 6D-rotation anchor for the learned queries."""
+        return self.rot_anchor_raw
 
     def matching_content(self, batch_size: int) -> torch.Tensor:
         """(B, num_queries, C) learned content embedding, expanded per sample."""

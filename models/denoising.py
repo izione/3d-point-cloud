@@ -82,7 +82,20 @@ class QueryDenoising(nn.Module):
     def build(self, gt_boxes_list: list, pc_range: torch.Tensor, device):
         """Returns None if every sample in the batch has zero GT boxes (nothing
         to denoise that step), else (dn_content (B,G*Mmax,C), dn_ref (B,G*Mmax,3),
-        dn_valid (B,G*Mmax) bool, dn_targets dict of (B,G*Mmax,*), group_size=Mmax)."""
+        dn_size_anchor (B,G*Mmax,3), dn_rot_anchor (B,G*Mmax,6), dn_valid
+        (B,G*Mmax) bool, dn_targets dict of (B,G*Mmax,*), group_size=Mmax).
+
+        dn_size_anchor/dn_rot_anchor are the SAME noised log-size/6D rotation
+        already embedded into dn_content -- SetPredictionHead adds them the
+        same way it adds dn_ref (the noised center) to get the center
+        prediction, so a denoising query's size/rotation head only has to
+        predict the CORRECTION back to the true box, not the absolute value
+        from scratch. Mirrors matching queries' own learned size/rotation
+        anchors (DetrDecoder.matching_log_size_anchor/matching_rotation_anchor)
+        -- see detector_detr.py for why matching queries need this too (without
+        it, size regression measurably never learned anything: its loss
+        matched a trivial "always predict the dataset's mean size" baseline
+        for an entire 20-epoch run)."""
         batch_size = len(gt_boxes_list)
         m_list = [g.shape[0] for g in gt_boxes_list]
         m_max = max(m_list)
@@ -123,10 +136,12 @@ class QueryDenoising(nn.Module):
         # flatten (G,Mmax) -> one query dimension
         dn_content = content.reshape(batch_size, G * m_max, self.channels)
         dn_ref = noised_center.reshape(batch_size, G * m_max, 3)
+        dn_size_anchor = noised_log_size.reshape(batch_size, G * m_max, 3)
+        dn_rot_anchor = noised_sixd.reshape(batch_size, G * m_max, 6)
         dn_valid = valid_g.reshape(batch_size, G * m_max)
         dn_targets = {
             "center": true_center.reshape(batch_size, G * m_max, 3),
             "log_size": torch.log(true_size.clamp(min=1e-3)).reshape(batch_size, G * m_max, 3),
             "rot_matrix": true_R.reshape(batch_size, G * m_max, 3, 3),
         }
-        return dn_content, dn_ref, dn_valid, dn_targets, m_max
+        return dn_content, dn_ref, dn_size_anchor, dn_rot_anchor, dn_valid, dn_targets, m_max

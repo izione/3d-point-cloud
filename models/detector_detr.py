@@ -154,20 +154,26 @@ class DiverDetectorDETR(nn.Module):
         num_matching = self.decoder.num_queries
         match_content = self.decoder.matching_content(b["batch_size"])
         match_ref = self.decoder.matching_reference_points(self.pc_range)[None, :, :].expand(b["batch_size"], -1, -1)
+        match_size_anchor = self.decoder.matching_log_size_anchor()[None, :, :].expand(b["batch_size"], -1, -1)
+        match_rot_anchor = self.decoder.matching_rotation_anchor()[None, :, :].expand(b["batch_size"], -1, -1)
 
         dn_bundle = None
         if self.training and self.use_denoising:
             built = self.denoising.build(b["gt_boxes"], self.pc_range, device)
             if built is not None:
-                dn_content, dn_ref, dn_valid, dn_targets, group_size = built
+                dn_content, dn_ref, dn_size_anchor, dn_rot_anchor, dn_valid, dn_targets, group_size = built
                 query_content = torch.cat([match_content, dn_content], dim=1)
                 ref_points_all = torch.cat([match_ref, dn_ref], dim=1)
+                size_anchor_all = torch.cat([match_size_anchor, dn_size_anchor], dim=1)
+                rot_anchor_all = torch.cat([match_rot_anchor, dn_rot_anchor], dim=1)
                 attn_mask = build_attention_mask(num_matching, group_size, self.denoising.num_groups, device)
                 dn_bundle = (dn_valid, dn_targets)
             else:
-                query_content, ref_points_all, attn_mask = match_content, match_ref, None
+                query_content, ref_points_all = match_content, match_ref
+                size_anchor_all, rot_anchor_all, attn_mask = match_size_anchor, match_rot_anchor, None
         else:
-            query_content, ref_points_all, attn_mask = match_content, match_ref, None
+            query_content, ref_points_all = match_content, match_ref
+            size_anchor_all, rot_anchor_all, attn_mask = match_size_anchor, match_rot_anchor, None
 
         query_pos = ref_point_positional_embedding(ref_points_all, channels)
         # return_intermediate=True gets every decoder layer's output (not just
@@ -175,7 +181,7 @@ class DiverDetectorDETR(nn.Module):
         # DetrDecoder.forward()'s docstring for why.
         _, intermediate = self.decoder(query_content, query_pos, key_pad, key_pos, key_padding_mask, attn_mask,
                                         return_intermediate=True)
-        all_preds = [self.head(feat, ref_points_all) for feat in intermediate]
+        all_preds = [self.head(feat, ref_points_all, size_anchor_all, rot_anchor_all) for feat in intermediate]
         pred_all = all_preds[-1]
 
         if dn_bundle is not None:

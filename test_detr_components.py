@@ -410,6 +410,61 @@ def check_auxiliary_loss_strengthens_early_layer_gradient():
           f"{grad_final_only:.4f} (final-layer-only) -> {grad_with_aux:.4f} (with aux)")
 
 
+def check_matching_query_size_rotation_anchors():
+    """The fix for size regression never learning anything (see
+    detector_detr.py's docstring / DetrDecoder.size_anchor_raw's comment): a
+    matching query's log-size and rotation heads now predict a CORRECTION
+    from a learned per-query anchor, the same way center already corrects
+    from a learned reference point, instead of an absolute value with
+    nothing to anchor to. Confirms the wiring: with the head's own
+    correction-MLP weights zeroed out, its output must equal the anchor
+    exactly (proving the anchor really reaches the prediction, not just sits
+    unused), and confirms the anchor is a real, gradient-receiving parameter."""
+    from models.decoder_detr import DetrDecoder, ref_point_positional_embedding
+    from models.heads_detr import SetPredictionHead
+
+    torch.manual_seed(0)
+    B, Q, C = 2, 5, 16
+    decoder = DetrDecoder(C, num_queries=Q, num_layers=1, num_heads=4)
+    head = SetPredictionHead(C)
+
+    size_anchor = decoder.matching_log_size_anchor()
+    rot_anchor = decoder.matching_rotation_anchor()
+    assert size_anchor.shape == (Q, 3) and rot_anchor.shape == (Q, 6)
+    # not degenerately all-zero/identical across queries (matches query_embed's
+    # own "small random init so queries can specialize" reasoning)
+    assert size_anchor.std().item() > 1e-4
+    assert not torch.allclose(rot_anchor[0], rot_anchor[1])
+
+    # zero out the correction heads' weights -> log_size_head(x)==bias,
+    # rot_head(x)==bias (both zero-initialized by default), so the head's
+    # output must equal the anchor exactly.
+    with torch.no_grad():
+        for p in head.log_size_head.parameters():
+            p.zero_()
+        for p in head.rot_head.parameters():
+            p.zero_()
+
+    query_feat = torch.randn(B, Q, C)
+    ref_points = torch.randn(B, Q, 3)
+    size_anchor_b = size_anchor[None].expand(B, -1, -1)
+    rot_anchor_b = rot_anchor[None].expand(B, -1, -1)
+    out = head(query_feat, ref_points, size_anchor_b, rot_anchor_b)
+    assert torch.allclose(out["log_size"], size_anchor_b), \
+        "with a zeroed correction head, log_size should exactly equal the anchor"
+    assert torch.allclose(out["sixd"], rot_anchor_b), \
+        "with a zeroed correction head, sixd should exactly equal the anchor"
+
+    # the anchors must be real learnable parameters (gradients flow to them)
+    out2 = head(torch.randn(B, Q, C, requires_grad=True), ref_points,
+                decoder.matching_log_size_anchor()[None].expand(B, -1, -1),
+                decoder.matching_rotation_anchor()[None].expand(B, -1, -1))
+    out2["log_size"].sum().backward()
+    assert decoder.size_anchor_raw.grad is not None and torch.isfinite(decoder.size_anchor_raw.grad).all()
+    print("[ok] matching-query size/rotation anchors: correct shapes, per-query diversity, "
+          "head output equals anchor when the correction MLP is zeroed, gradients reach the anchor")
+
+
 def check_pad_tokens_empty_sample():
     from models.decoder_detr import pad_tokens
 
@@ -447,24 +502,33 @@ def check_query_denoising_build():
     dn = QueryDenoising(channels, num_groups=2, center_noise_scale=0.0, size_noise_scale=0.0, rot_noise_deg=0.0)
     built = dn.build([gt0, gt1], pc_range, torch.device("cpu"))
     assert built is not None
-    dn_content, dn_ref, dn_valid, dn_targets, m_max = built
+    dn_content, dn_ref, dn_size_anchor, dn_rot_anchor, dn_valid, dn_targets, m_max = built
 
     assert m_max == 3
     G = 2
     assert dn_content.shape == (2, G * m_max, channels)
+    assert dn_size_anchor.shape == (2, G * m_max, 3)
+    assert dn_rot_anchor.shape == (2, G * m_max, 6)
     assert dn_valid.shape == (2, G * m_max)
     # sample0: all 3 slots real in both groups; sample1: only slot 0 real per group
     expected_valid = torch.tensor([[True, True, True] * G, [True, False, False] * G])
     assert torch.equal(dn_valid, expected_valid), f"valid mask mismatch:\n{dn_valid}\nvs\n{expected_valid}"
 
-    # noise scales are all 0 -> the "noised" reference point must exactly equal
-    # the true GT center for every REAL slot (this isolates the noise-generation
-    # math from the learned embedding, which check_full_model_forward_backward
-    # already covers together with the rest of the model)
+    # noise scales are all 0 -> the "noised" reference point/size/rotation must
+    # exactly equal the true GT box for every REAL slot (this isolates the
+    # noise-generation math from the learned embedding, which
+    # check_full_model_forward_backward already covers together with the rest
+    # of the model)
     real = dn_valid
     assert torch.allclose(dn_ref[real], dn_targets["center"][real], atol=1e-5), \
         "with noise scale 0, noised center should exactly equal the true GT center"
-    print(f"[ok] QueryDenoising.build(): shapes correct, valid mask correct, zero-noise ref==true center")
+    assert torch.allclose(dn_size_anchor[real], dn_targets["log_size"][real], atol=1e-5), \
+        "with noise scale 0, noised log-size anchor should exactly equal the true GT log-size"
+    from models.rotation6d import sixd_to_matrix
+    assert torch.allclose(sixd_to_matrix(dn_rot_anchor[real]), dn_targets["rot_matrix"][real], atol=1e-4), \
+        "with noise scale 0, noised rotation anchor should decode to the true GT rotation matrix"
+    print(f"[ok] QueryDenoising.build(): shapes correct, valid mask correct, "
+          f"zero-noise ref/size/rotation anchors == true GT box")
 
     mask = build_attention_mask(num_matching=5, group_size=m_max, num_groups=G, device=torch.device("cpu"))
     total = 5 + G * m_max
@@ -553,6 +617,7 @@ if __name__ == "__main__":
     check_voxel_pooling_attention()
     check_point_attention_vfe()
     check_decoder_return_intermediate()
+    check_matching_query_size_rotation_anchors()
     check_auxiliary_loss_strengthens_early_layer_gradient()
     check_pad_tokens_empty_sample()
     check_query_denoising_build()

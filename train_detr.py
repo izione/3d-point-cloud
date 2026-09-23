@@ -141,11 +141,32 @@ def main():
     logger = LossLoggerDetr(log_path)
     print(f"logging per-step/per-epoch losses to {log_path}")
 
+    # Resuming from a mid-epoch (not epoch-complete) checkpoint would otherwise
+    # restart THIS epoch's dataloader from batch 0 every time -- global_step
+    # and the LR schedule still advance correctly, but the epoch's own loop
+    # never reaches its natural end (steps_per_epoch), so run_validation()/the
+    # epoch checkpoint/AP@0.5 never fire. Matters a lot for short foreground
+    # training chunks chained via --resume (this machine's background-process
+    # execution is inexplicably ~5-9x slower than foreground, so long runs
+    # here are chunked): skip the already-trained batches of the resumed
+    # epoch instead, so consecutive chunks actually accumulate toward
+    # completing one epoch rather than each one re-doing its start.
+    resume_skip_steps = 0
+    if ckpt is not None and not ckpt.get("epoch_complete"):
+        resume_skip_steps = global_step - start_epoch * steps_per_epoch
+        if resume_skip_steps > 0:
+            print(f"resuming mid-epoch: skipping the first {resume_skip_steps} "
+                  f"already-trained batches of epoch {start_epoch}")
+
     model.train()
     for epoch in range(start_epoch, num_epochs):
         epoch_t0 = time.time()
         running_loss = 0.0
+        n_steps_run = 0
+        skip = resume_skip_steps if epoch == start_epoch else 0
         for step, batch in enumerate(train_loader):
+            if step < skip:
+                continue  # dataloader I/O only (cheap, prefetched) -- no forward/backward
             losses, _, _, matches = model.loss(batch, device)
             optimizer.zero_grad()
             losses["total"].backward()
@@ -154,6 +175,7 @@ def main():
             scheduler.step()
             global_step += 1
             running_loss += losses["total"].item()
+            n_steps_run += 1
             lr = scheduler.get_last_lr()[0]
             n_pos = sum(qi.numel() for qi, _ in matches)
             logger.log_train_step(epoch, global_step, losses, lr, n_pos)
@@ -166,7 +188,7 @@ def main():
                 save_checkpoint(ckpt_dir / f"{exp_name}_step_{global_step}.pth", model, optimizer, scheduler, epoch, global_step, cfg, epoch_complete=False)
 
         epoch_time = time.time() - epoch_t0
-        avg_train_loss = running_loss / max(len(train_loader), 1)
+        avg_train_loss = running_loss / max(n_steps_run, 1)
         val_losses, val_ap50 = run_validation(model, val_loader, device)
         logger.log_val_epoch(epoch, global_step, val_losses, val_ap50)
         print(f"epoch {epoch}: train_loss={avg_train_loss:.4f} val_loss={val_losses['total']:.4f} "

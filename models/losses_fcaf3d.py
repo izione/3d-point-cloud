@@ -42,7 +42,14 @@ def compute_fcaf3d_loss(level_preds: list, level_targets: list, loss_cfg: dict) 
             continue
 
         pred_center = pred["center"][pos]
-        pred_log_size = pred["log_size"][pos]
+        # An unstable early-training step can push log_size to a large value;
+        # exp() of that overflows float32 (~3.4e38, so anything past ~35
+        # cubed already overflows), which then turns the IoU loss's
+        # size1.prod() into inf and, a step later, nan -- hit this for real
+        # (iou term spiked to 34 then the whole loss went nan the next step).
+        # Clamped to +-15 nats (~3.3M x smaller/larger than 1), far outside
+        # any real object size, so this never affects a well-behaved model.
+        pred_log_size = pred["log_size"][pos].clamp(min=-15.0, max=15.0)
         pred_size = pred_log_size.exp()
         pred_R = sixd_to_matrix(pred["sixd"][pos])
         gt_center = tgt["center"][pos]
@@ -76,5 +83,11 @@ def compute_fcaf3d_loss(level_preds: list, level_targets: list, loss_cfg: dict) 
 
     total = (weights["cls"] * cls_loss + weights["iou"] * iou_loss + weights["center"] * center_loss +
              weights["size"] * size_loss + weights["rotation"] * rot_loss + weights["centerness"] * cntr_loss)
+    # Same defensive guard as models/matcher.py's cost-matrix clamp: a
+    # destabilized step can still produce inf/nan here despite the log_size
+    # clamp above (e.g. via center/rotation), and without this one bad step
+    # poisons every parameter for the rest of a multi-hour run instead of
+    # just being a wasted step.
+    total = torch.nan_to_num(total, nan=0.0, posinf=1e4, neginf=0.0)
     return {"total": total, "cls": cls_loss, "iou": iou_loss, "center": center_loss, "size": size_loss,
             "rotation": rot_loss, "centerness": cntr_loss, "n_pos": n_pos}

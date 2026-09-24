@@ -104,13 +104,43 @@ class SparseUNetBackboneSpconv(nn.Module):
         self.total_stride = down_stride
 
     def forward(self, features, coords, index_grid, grid_size, batch_size):
+        (fine_feat, fine_coords, fine_index_grid, fine_grid_size), _ = self._forward_impl(
+            features, coords, index_grid, grid_size, batch_size)
+        return fine_feat, fine_coords, fine_index_grid, fine_grid_size
+
+    def forward_multilevel(self, features, coords, index_grid, grid_size, batch_size):
+        """FCAF3D-style multi-level output: returns [fine_level, coarse_level] as
+        (features, coords, index_grid, grid_size, net_stride) tuples -- the
+        decoded (skip-fused, richer) fine level plus the deepest encoder
+        stage's own raw (never-decoded) output, for a dense multi-level head
+        (models/heads_fcaf3d.py) to run on independently, instead of only the
+        single fine level DiverDetectorDETR's cross-attention key set uses.
+        Only 2 levels since this backbone always has exactly one decoder
+        stage (n encoder stages, n-1 decoder stages -- see __init__)."""
+        fine, encoder_outputs = self._forward_impl(features, coords, index_grid, grid_size, batch_size)
+        coarse = encoder_outputs[-1]
+        coarse_grid_size = tuple(int(s) for s in coarse.spatial_shape)
+        coarse_coords = coarse.indices.long()
+        coarse_stride = 1
+        for stage in self.encoder_stages:
+            coarse_stride *= stage.down.stride[0]
+        return [
+            fine + (self.total_stride,),
+            (coarse.features, coarse_coords,
+             build_index_grid(coarse_coords, batch_size, coarse_grid_size, device=features.device),
+             coarse_grid_size, coarse_stride),
+        ]
+
+    def _forward_impl(self, features, coords, index_grid, grid_size, batch_size):
         sp_coords = coords.to(dtype=torch.int32) if coords.dtype != torch.int32 else coords
         x = spconv.SparseConvTensor(features, sp_coords, list(grid_size), batch_size)
 
         skips = []  # skips[i] = SparseConvTensor INPUT to encoder_stages[i]
+        encoder_outputs = []  # encoder_outputs[i] = SparseConvTensor OUTPUT of encoder_stages[i]
         for stage in self.encoder_stages:
             skips.append(x)
             x = stage(x)
+            encoder_outputs.append(x)
 
         for stage in self.decoder_stages:
             x = stage(x, skips.pop())
@@ -118,4 +148,4 @@ class SparseUNetBackboneSpconv(nn.Module):
         out_coords = x.indices.long()
         out_grid_size = tuple(int(s) for s in x.spatial_shape)
         out_index_grid = build_index_grid(out_coords, batch_size, out_grid_size, device=features.device)
-        return x.features, out_coords, out_index_grid, out_grid_size
+        return (x.features, out_coords, out_index_grid, out_grid_size), encoder_outputs

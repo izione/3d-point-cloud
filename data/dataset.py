@@ -1,6 +1,5 @@
 import json
 import os
-import random
 from pathlib import Path
 
 import numpy as np
@@ -25,21 +24,25 @@ def _list_scene_frames(root: Path, scene_ids: list) -> list:
 class SonarDiverDataset(Dataset):
     """Reads raw sonar .bin frames + JSON labels for the 4-person scene split.
 
-    TEST is a genuine held-out set of whole scenes (DATA.TEST_SCENES) - no frame
-    from a test scene ever appears in train/val, so it measures generalization to
-    an unseen scene, not just an unseen frame. TRAIN/VAL are instead a frame-level
-    random split of DATA.TRAINVAL_SCENES pooled together (deterministic, seeded by
-    DATA.SPLIT_SEED): every non-test scene contributes frames to both train and
-    val, so val loss reflects "how well is training going" across the full pose/
-    scene diversity, rather than "how well does it generalize to a couple of
-    held-out scenes" (that's what TEST is for). DATA.VAL_FRAME_RATIO controls the
-    split fraction (default 0.1).
+    TRAIN/VAL/TEST are all genuine held-out sets of WHOLE SCENES (DATA.TRAIN_SCENES/
+    VAL_SCENES/TEST_SCENES) -- no frame from a val or test scene ever appears in
+    train, so every split measures generalization to unseen scenes, not just
+    unseen frames within an otherwise-seen scene. This is the canonical split
+    from the sibling eugene/SonarVoxNet project's tools/prepare_data.py (see
+    configs/splits/scene_split.json for the reference copy) -- both projects use
+    the exact same scene assignment. Replaced 2026-09-26 a previous frame-level
+    random split of a pooled TRAINVAL_SCENES set (every non-test scene
+    contributing frames to both train and val); every result from before that
+    date was measured under the OLD split and isn't directly comparable to runs
+    after it.
 
     Each item returns raw points (already filtered to the point-cloud range) and
     GT boxes as (cx, cy, cz, length, width, height, qw, qx, qy, qz). Voxelization
     and VFE feature construction happen later (collate_fn + model), not here, so
     this class stays a thin, easily-testable IO layer.
     """
+
+    _SPLIT_KEY = {"train": "TRAIN_SCENES", "val": "VAL_SCENES", "test": "TEST_SCENES"}
 
     def __init__(self, cfg: dict, split: str):
         assert split in ("train", "val", "test")
@@ -48,16 +51,8 @@ class SonarDiverDataset(Dataset):
         self.root = Path(cfg["DATA"]["ROOT"])
         self.pc_range = np.array(cfg["DATA"]["POINT_CLOUD_RANGE"], dtype=np.float32)
 
-        if split == "test":
-            self.samples = _list_scene_frames(self.root, cfg["DATA"]["TEST_SCENES"])
-        else:
-            all_frames = _list_scene_frames(self.root, cfg["DATA"]["TRAINVAL_SCENES"])
-            all_frames.sort(key=lambda p: str(p))  # deterministic order before shuffling
-            rng = random.Random(cfg["DATA"].get("SPLIT_SEED", 42))
-            rng.shuffle(all_frames)
-            val_ratio = cfg["DATA"].get("VAL_FRAME_RATIO", 0.1)
-            n_val = round(len(all_frames) * val_ratio)
-            self.samples = all_frames[:n_val] if split == "val" else all_frames[n_val:]
+        self.samples = _list_scene_frames(self.root, cfg["DATA"][self._SPLIT_KEY[split]])
+        self.samples.sort(key=lambda p: str(p))  # deterministic order regardless of filesystem enumeration order
 
         if len(self.samples) == 0:
             raise RuntimeError(f"no frames found for split={split}")

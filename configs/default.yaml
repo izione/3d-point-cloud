@@ -16,14 +16,18 @@ DATA:
                                  # sizes needed -> more steps/epoch) for an unproven accuracy gain -- back
                                  # to 0.2 for now. Revisit 0.1 later once 0.2 has a real baseline result.
   POINT_CLOUD_RANGE: [0.0, -11.4, -5.6, 16.2, 11.4, 5.6]   # xmin,ymin,zmin,xmax,ymax,zmax
-  # TEST is a genuine held-out scene split over all 4 persons -- no frame from
-  # these scenes ever appears in train/val. Replaced 2026-09-01 with an
-  # explicit 8-scene set (was the 3-scene scene_0078/0067/0019 set); scene_0067
-  # carries over, scene_0078/scene_0019 moved back into TRAINVAL_SCENES below.
-  # scene_0077/scene_0088/scene_0093 needed their raw sonar/camera data copied
-  # from uScenes/ into dataset/Person4/ first (they had annotations already
-  # but no Person-assigned data folder -- see apply_new_annotations.py's
-  # SCENE_TO_PERSON, updated same day) before they could be used at all.
+  # Canonical scene-level 3-way split (2026-09-26), copied from the sibling
+  # eugene/SonarVoxNet project's tools/prepare_data.py so both projects use the
+  # exact same scene assignment -- see configs/splits/scene_split.json for the
+  # reference copy. TRAIN/VAL/TEST are all genuine held-out whole scenes now
+  # (data/dataset.py::SonarDiverDataset picks the list matching the requested
+  # split directly, no frame-level shuffling): no frame from a val or test
+  # scene ever appears in train. TEST_SCENES is unchanged from before this
+  # date (see git history below this comment for its own prior history);
+  # TRAIN_SCENES/VAL_SCENES replace the old pooled TRAINVAL_SCENES +
+  # VAL_FRAME_RATIO/SPLIT_SEED frame-level random split -- every result from
+  # before 2026-09-26 was measured under that old split and isn't directly
+  # comparable to runs after it.
   TEST_SCENES:
     - "Person2/scene_0035"
     - "Person3/scene_0043"
@@ -33,42 +37,36 @@ DATA:
     - "Person4/scene_0088"
     - "Person2/scene_0089"
     - "Person4/scene_0093"
-  # TRAIN and VAL are instead a frame-level random split of this pool (see
-  # SonarDiverDataset): every one of these 28 scenes contributes frames to BOTH
-  # train and val, so val loss tracks "how well is training going" across the
-  # full pose/scene diversity, rather than generalization to a couple of unseen
-  # scenes (that's what TEST measures).
-  TRAINVAL_SCENES:
+  TRAIN_SCENES:
     - "Person2/scene_0050"
     - "Person2/scene_0091"
     - "Person2/scene_0079"
     - "Person2/scene_0078"
-    - "Person3/scene_0019"
     - "Person1/scene_0068"
     - "Person1/scene_0063"
     - "Person3/scene_0022"
-    - "Person4/scene_0090"
     - "Person3/scene_0080"
     - "Person4/scene_0074"
     - "Person1/scene_0036"
-    - "Person3/scene_0064"
     - "Person1/scene_0042"
     - "Person3/scene_0048"
     - "Person3/scene_0072"
-    - "Person4/scene_0075"
-    - "Person1/scene_0049"
     - "Person4/scene_0021"
-    - "Person2/scene_0009"
     - "Person3/scene_0082"
     - "Person1/scene_0000"
     - "Person1/scene_0044"
     - "Person3/scene_0070"
     - "Person2/scene_0076"
-    - "Person3/scene_0092"
     - "Person4/scene_0065"
     - "Person4/scene_0081"
-  VAL_FRAME_RATIO: 0.1          # actually read (data/dataset.py) -- fraction of TRAINVAL_SCENES' pooled frames held out for val
-  SPLIT_SEED: 42                # actually read (data/dataset.py) -- shuffle seed for the train/val frame split
+  VAL_SCENES:
+    - "Person2/scene_0009"
+    - "Person3/scene_0019"
+    - "Person1/scene_0049"
+    - "Person3/scene_0064"
+    - "Person4/scene_0075"
+    - "Person4/scene_0090"
+    - "Person3/scene_0092"
   AUGMENTATION: false          # [not read by code] no augmentation is implemented at all -- nothing to toggle
 
 VFE:

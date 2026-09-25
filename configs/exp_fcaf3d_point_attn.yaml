@@ -1,0 +1,15 @@
+# Same experiment as exp_fcaf3d.yaml (FCAF3D-style dense head), with the
+# only change being the VFE: PointAttentionVFE (k=16 nearest-neighbor Point
+# Transformer self-attention per point, then learned cross-attention pooling
+# per voxel, models/vfe_point_attn.py) instead of mVFE's plain per-point MLP
+# + max-pool. Inherits everything else (backbone, head, assign, loss,
+# optimization) unchanged from exp_fcaf3d.yaml for a controlled comparison.
+BASE_CONFIG: exp_fcaf3d.yaml
+
+VFE:
+  TYPE: point_attn
+  POINT_ATTN:
+    OUT_CHANNELS: 128
+    POINT_CHANNELS: 64
+    NUM_BLOCKS: 1
+    K: 16

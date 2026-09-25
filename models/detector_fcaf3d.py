@@ -10,6 +10,7 @@ import torch.nn as nn
 
 from .vfe import VFE
 from .vfe_m import MVFE
+from .vfe_point_attn import PointAttentionVFE
 from .backbone3d_unet_spconv import SparseUNetBackboneSpconv
 from .heads_fcaf3d import FCAF3DHead
 from .assign_fcaf3d import assign_multilevel
@@ -29,9 +30,20 @@ class DiverDetectorFCAF3D(nn.Module):
         self.register_buffer("voxel_size", torch.tensor(voxel_size, dtype=torch.float32))
         self.grid_size = tuple(round((pc_range[3 + i] - pc_range[i]) / voxel_size[i]) for i in range(3))
 
-        vfe_type = cfg["VFE"].get("TYPE", "mvfe")
-        vfe_cls = MVFE if vfe_type == "mvfe" else VFE
-        self.vfe = vfe_cls(num_filters=cfg["VFE"]["NUM_FILTERS"])
+        # mirrors models/detector_detr.py's own VFE.TYPE branching -- point_attn
+        # (Point Transformer k-NN self-attention + cross-attention voxel
+        # pooling, models/vfe_point_attn.py) needs point_batch_idx/batch_size
+        # at call time, unlike mvfe/vfe, so forward() branches on this too.
+        self.vfe_type = cfg["VFE"].get("TYPE", "mvfe")
+        if self.vfe_type == "point_attn":
+            pcfg = cfg["VFE"].get("POINT_ATTN", {})
+            self.vfe = PointAttentionVFE(
+                pcfg.get("OUT_CHANNELS", 128), pcfg.get("POINT_CHANNELS", 64),
+                pcfg.get("NUM_BLOCKS", 1), pcfg.get("K", 16),
+            )
+        else:
+            vfe_cls = MVFE if self.vfe_type == "mvfe" else VFE
+            self.vfe = vfe_cls(num_filters=cfg["VFE"]["NUM_FILTERS"])
 
         bcfg = cfg["BACKBONE"]
         assert bcfg.get("TYPE") == "sparse_unet", \
@@ -73,7 +85,11 @@ class DiverDetectorFCAF3D(nn.Module):
     def forward(self, batch, device):
         b = self._to_device(batch, device)
         num_voxels = b["voxel_coords"].shape[0]
-        vfe_out = self.vfe(b["points"], b["point_voxel_idx"], b["voxel_coords"], num_voxels, self.pc_range, self.voxel_size)
+        if self.vfe_type == "point_attn":
+            vfe_out = self.vfe(b["points"], b["point_voxel_idx"], b["voxel_coords"], num_voxels, self.pc_range,
+                                self.voxel_size, b["point_batch_idx"], b["batch_size"])
+        else:
+            vfe_out = self.vfe(b["points"], b["point_voxel_idx"], b["voxel_coords"], num_voxels, self.pc_range, self.voxel_size)
         index_grid = build_index_grid(b["voxel_coords"], b["batch_size"], self.grid_size, device=device)
         levels = self.backbone.forward_multilevel(vfe_out, b["voxel_coords"], index_grid, self.grid_size, b["batch_size"])
 

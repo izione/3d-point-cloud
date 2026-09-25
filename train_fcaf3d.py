@@ -40,6 +40,13 @@ AP_IOU_THRESHOLD = 0.35
 # slowing training.
 AP_SCORE_THRESHOLD = 0.1
 AP_NMS_RADIUS = 0.5
+# The scene-disjoint split's val set (8037 frames, 7 full scenes) is ~2.8x the
+# old frame-level-random one (2890 frames) -- computing AP@0.35 every single
+# epoch would add an estimated ~39min/epoch just for the grid-sampled
+# rotation-aware IoU. val_loss (cheap, already needed to track convergence)
+# still runs every epoch; only the expensive AP computation is skipped except
+# on epochs where epoch % AP_EVERY_N_EPOCHS == 0.
+AP_EVERY_N_EPOCHS = 3
 
 
 def rotation_aware_iou_matrix(det: dict, gt_boxes: torch.Tensor) -> torch.Tensor:
@@ -84,13 +91,19 @@ class LossLoggerFCAF3D:
 
 
 @torch.no_grad()
-def run_validation(model, val_loader, device):
+def run_validation(model, val_loader, device, compute_ap=True):
     """Reuses the same forward pass model.loss() already ran for the val-loss
     terms to also decode (NMS + score threshold, see AP_SCORE_THRESHOLD/
     AP_NMS_RADIUS) and build each frame's rotation-aware IoU matrix, so
     AP@0.35 costs no extra forward passes -- only decode()'s and
     oriented_iou_3d_sampled's overhead on top of validation that already ran
-    every epoch."""
+    every epoch.
+
+    compute_ap=False skips that decode+IoU+AP work entirely (returns
+    ap=None): with the scene-disjoint split's much bigger val set (8037
+    frames vs the old 2890), AP@0.35 alone took ~39min/epoch by extrapolation
+    -- see AP_EVERY_N_EPOCHS in main() for running it every Nth epoch only
+    instead of skipping it via this flag directly."""
     model.eval()
     sums = {k: 0.0 for k in LOSS_KEYS}
     n_pos_total, n = 0, 0
@@ -102,17 +115,20 @@ def run_validation(model, val_loader, device):
         n_pos_total += losses["n_pos"]
         n += 1
 
-        dets = model.decode(level_preds, level_batch_idx, len(gt_boxes_list),
-                             score_threshold=AP_SCORE_THRESHOLD, nms_radius=AP_NMS_RADIUS)
-        for b, gt_boxes in enumerate(gt_boxes_list):
-            gt_boxes = gt_boxes.cpu()
-            det = dets[b]
-            total_gt += gt_boxes.shape[0]
-            frame_data.append({"scores": det["score"], "ious": rotation_aware_iou_matrix(det, gt_boxes)})
+        if compute_ap:
+            dets = model.decode(level_preds, level_batch_idx, len(gt_boxes_list),
+                                 score_threshold=AP_SCORE_THRESHOLD, nms_radius=AP_NMS_RADIUS)
+            for b, gt_boxes in enumerate(gt_boxes_list):
+                gt_boxes = gt_boxes.cpu()
+                det = dets[b]
+                total_gt += gt_boxes.shape[0]
+                frame_data.append({"scores": det["score"], "ious": rotation_aware_iou_matrix(det, gt_boxes)})
     model.train()
     n = max(n, 1)
     avg = {k: v / n for k, v in sums.items()}
     avg["n_pos"] = n_pos_total
+    if not compute_ap:
+        return avg, None
     _, _, ap = pr_curve_for_threshold(frame_data, total_gt, AP_IOU_THRESHOLD)
     return avg, ap
 
@@ -221,10 +237,12 @@ def main():
 
         epoch_time = time.time() - epoch_t0
         avg_train_loss = running_loss / max(n_steps_run, 1)
-        val_losses, val_ap35 = run_validation(model, val_loader, device)
+        compute_ap = (epoch % AP_EVERY_N_EPOCHS == 0)
+        val_losses, val_ap35 = run_validation(model, val_loader, device, compute_ap=compute_ap)
         logger.log_val_epoch(epoch, global_step, val_losses, val_ap35)
+        ap_str = f"val_AP@{AP_IOU_THRESHOLD:.2f}={val_ap35:.4f}" if compute_ap else f"val_AP@{AP_IOU_THRESHOLD:.2f}=skipped"
         print(f"epoch {epoch}: train_loss={avg_train_loss:.4f} val_loss={val_losses['total']:.4f} "
-              f"val_AP@{AP_IOU_THRESHOLD:.2f}={val_ap35:.4f} time={epoch_time:.1f}s")
+              f"{ap_str} time={epoch_time:.1f}s")
 
         if ckpt_every_epochs and (epoch + 1) % ckpt_every_epochs == 0:
             save_checkpoint(ckpt_dir / f"{exp_name}_epoch_{epoch}.pth", model, optimizer, scheduler, epoch, global_step, cfg, epoch_complete=True)

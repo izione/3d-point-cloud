@@ -63,6 +63,47 @@ def points_in_oriented_box(points: torch.Tensor, center: torch.Tensor, size: tor
     return (local.abs() <= half[None, :]).all(dim=-1)
 
 
+def oriented_iou_3d_sampled(center1: torch.Tensor, size1: torch.Tensor, R1: torch.Tensor,
+                             center2: torch.Tensor, size2: torch.Tensor, R2: torch.Tensor,
+                             n_samples_per_axis: int = 10) -> float:
+    """Approximate rotation-AWARE 3D IoU via a deterministic regular grid over
+    the union axis-aligned bounding box of both (rotated) boxes -- unlike
+    axis_aligned_iou_3d, two boxes that only overlap when rotation is ignored
+    (or that are heavily rotated so their true footprint is much smaller than
+    their AABB) are scored correctly here. center/size: (3,) each, R: (3,3)
+    rotation matrix (not quaternion -- callers already have matrices from
+    rotation6d.sixd_to_matrix / quat_to_rotmat). No gradient (grid membership
+    is a hard threshold) -- eval-only, like axis_aligned_iou_3d.
+
+    Accurate to within the grid's own resolution (n_samples_per_axis=10 -> 1000
+    sample points spanning the union box every call); a per-epoch health-check
+    metric, not meant to replace a closed-form rotated-box intersection."""
+    def corners(center, size, R):
+        signs = _SIGNS.to(center.device)                     # (8,3)
+        local = signs * (size[None, :] / 2)                  # (8,3)
+        return local @ R.T + center[None, :]                 # (8,3)
+
+    def inside(points, center, size, R):
+        local = (points - center[None, :]) @ R                # world -> local
+        half = size / 2
+        return (local.abs() <= half[None, :]).all(dim=-1)
+
+    c1, c2 = corners(center1, size1, R1), corners(center2, size2, R2)
+    lo = torch.minimum(c1.min(0).values, c2.min(0).values)
+    hi = torch.maximum(c1.max(0).values, c2.max(0).values)
+    if (hi <= lo).any():
+        return 0.0
+
+    lin = [torch.linspace(lo[d].item(), hi[d].item(), n_samples_per_axis, device=center1.device) for d in range(3)]
+    grid = torch.stack(torch.meshgrid(*lin, indexing="ij"), dim=-1).reshape(-1, 3)  # (N,3)
+
+    in1 = inside(grid, center1, size1, R1)
+    in2 = inside(grid, center2, size2, R2)
+    inter = (in1 & in2).sum().item()
+    union = (in1 | in2).sum().item()
+    return inter / union if union > 0 else 0.0
+
+
 def axis_aligned_iou_3d(center1, size1, center2, size2) -> float:
     """Volume-only 3D IoU: both boxes treated as axis-aligned cuboids (rotation
     ignored), closed-form -- no sampling. center/size: (3,) each.

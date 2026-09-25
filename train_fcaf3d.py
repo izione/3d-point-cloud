@@ -14,9 +14,50 @@ import torch
 import models.slotformer as slotformer
 from config_utils import load_config
 from models.detector_fcaf3d import DiverDetectorFCAF3D
+from models.box_utils import oriented_iou_3d_sampled, quat_to_rotmat
 from train import build_dataloader, save_checkpoint
+from test import pr_curve_for_threshold
 
 LOSS_KEYS = ["total", "cls", "iou", "center", "size", "rotation", "centerness"]
+
+# AP@0.35 with a rotation-AWARE IoU (not the axis-aligned one test.py's own
+# iou_matrix uses) -- ground truth here has full 3D orientation, and this
+# project's own axis_aligned_iou_3d would silently score two boxes that are
+# actually disjoint-but-rotated as heavily overlapping (see
+# models/box_utils.py::oriented_iou_3d_sampled's docstring / the test case
+# that motivated it). 0.35 rather than 0.5 since decode()'s per-voxel dense
+# candidates are still coarser than a single well-centered query -- 0.5 is
+# the DETR head's own threshold (configs/exp_detr_head.yaml), not
+# transplanted here without evidence it's still the right cutoff.
+AP_IOU_THRESHOLD = 0.35
+# decode() with score_threshold=0 keeps every active voxel across both levels
+# (thousands per frame) -- computing a rotation-aware IoU (grid-sampled, much
+# more expensive than the axis-aligned closed form) against that many
+# candidates every epoch would be far too slow. Filtering to a plausible
+# working point (same values evaluated by hand against the real trained
+# checkpoint: recall=0.98, precision=0.76 at these settings) keeps candidate
+# counts per frame small enough to run this every epoch without materially
+# slowing training.
+AP_SCORE_THRESHOLD = 0.1
+AP_NMS_RADIUS = 0.5
+
+
+def rotation_aware_iou_matrix(det: dict, gt_boxes: torch.Tensor) -> torch.Tensor:
+    """det: dict with 'center'/'size'/'rot_matrix' (Nd,3)/(Nd,3)/(Nd,3,3) from
+    DiverDetectorFCAF3D.decode(). gt_boxes: (Ng,10) [center(3),size(3),quat(4)].
+    Returns (Nd,Ng) rotation-aware IoU (see box_utils.oriented_iou_3d_sampled)."""
+    nd, ng = det["center"].shape[0], gt_boxes.shape[0]
+    ious = torch.zeros(nd, ng)
+    if nd == 0 or ng == 0:
+        return ious
+    gt_R = quat_to_rotmat(gt_boxes[:, 6:10])
+    for di in range(nd):
+        for gi in range(ng):
+            ious[di, gi] = oriented_iou_3d_sampled(
+                det["center"][di], det["size"][di], det["rot_matrix"][di],
+                gt_boxes[gi, :3], gt_boxes[gi, 3:6], gt_R[gi],
+            )
+    return ious
 
 
 class LossLoggerFCAF3D:
@@ -27,15 +68,15 @@ class LossLoggerFCAF3D:
         self.file = open(self.path, "a", newline="")
         self.writer = csv.writer(self.file)
         if is_new:
-            self.writer.writerow(["phase", "epoch", "step", "lr", "n_pos"] + LOSS_KEYS)
+            self.writer.writerow(["phase", "epoch", "step", "lr", "n_pos"] + LOSS_KEYS + ["ap35"])
             self.file.flush()
 
     def log_train_step(self, epoch, step, losses, lr):
-        self.writer.writerow(["train", epoch, step, lr, losses["n_pos"]] + [losses[k].item() for k in LOSS_KEYS])
+        self.writer.writerow(["train", epoch, step, lr, losses["n_pos"]] + [losses[k].item() for k in LOSS_KEYS] + [""])
         self.file.flush()
 
-    def log_val_epoch(self, epoch, step, avg_losses):
-        self.writer.writerow(["val", epoch, step, "", avg_losses["n_pos"]] + [avg_losses[k] for k in LOSS_KEYS])
+    def log_val_epoch(self, epoch, step, avg_losses, ap35):
+        self.writer.writerow(["val", epoch, step, "", avg_losses["n_pos"]] + [avg_losses[k] for k in LOSS_KEYS] + [ap35])
         self.file.flush()
 
     def close(self):
@@ -44,20 +85,36 @@ class LossLoggerFCAF3D:
 
 @torch.no_grad()
 def run_validation(model, val_loader, device):
+    """Reuses the same forward pass model.loss() already ran for the val-loss
+    terms to also decode (NMS + score threshold, see AP_SCORE_THRESHOLD/
+    AP_NMS_RADIUS) and build each frame's rotation-aware IoU matrix, so
+    AP@0.35 costs no extra forward passes -- only decode()'s and
+    oriented_iou_3d_sampled's overhead on top of validation that already ran
+    every epoch."""
     model.eval()
     sums = {k: 0.0 for k in LOSS_KEYS}
     n_pos_total, n = 0, 0
+    frame_data, total_gt = [], 0
     for batch in val_loader:
-        losses, _, _, _ = model.loss(batch, device)
+        losses, level_preds, level_batch_idx, gt_boxes_list = model.loss(batch, device)
         for k in LOSS_KEYS:
             sums[k] += losses[k].item()
         n_pos_total += losses["n_pos"]
         n += 1
+
+        dets = model.decode(level_preds, level_batch_idx, len(gt_boxes_list),
+                             score_threshold=AP_SCORE_THRESHOLD, nms_radius=AP_NMS_RADIUS)
+        for b, gt_boxes in enumerate(gt_boxes_list):
+            gt_boxes = gt_boxes.cpu()
+            det = dets[b]
+            total_gt += gt_boxes.shape[0]
+            frame_data.append({"scores": det["score"], "ious": rotation_aware_iou_matrix(det, gt_boxes)})
     model.train()
     n = max(n, 1)
     avg = {k: v / n for k, v in sums.items()}
     avg["n_pos"] = n_pos_total
-    return avg
+    _, _, ap = pr_curve_for_threshold(frame_data, total_gt, AP_IOU_THRESHOLD)
+    return avg, ap
 
 
 def main():
@@ -164,9 +221,10 @@ def main():
 
         epoch_time = time.time() - epoch_t0
         avg_train_loss = running_loss / max(n_steps_run, 1)
-        val_losses = run_validation(model, val_loader, device)
-        logger.log_val_epoch(epoch, global_step, val_losses)
-        print(f"epoch {epoch}: train_loss={avg_train_loss:.4f} val_loss={val_losses['total']:.4f} time={epoch_time:.1f}s")
+        val_losses, val_ap35 = run_validation(model, val_loader, device)
+        logger.log_val_epoch(epoch, global_step, val_losses, val_ap35)
+        print(f"epoch {epoch}: train_loss={avg_train_loss:.4f} val_loss={val_losses['total']:.4f} "
+              f"val_AP@{AP_IOU_THRESHOLD:.2f}={val_ap35:.4f} time={epoch_time:.1f}s")
 
         if ckpt_every_epochs and (epoch + 1) % ckpt_every_epochs == 0:
             save_checkpoint(ckpt_dir / f"{exp_name}_epoch_{epoch}.pth", model, optimizer, scheduler, epoch, global_step, cfg, epoch_complete=True)

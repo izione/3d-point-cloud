@@ -7,6 +7,59 @@ before trusting it" practice as test_detr_components.py. Run directly:
 import torch
 
 
+def check_oriented_iou_3d_sampled():
+    """models/box_utils.py::oriented_iou_3d_sampled -- the rotation-AWARE IoU
+    added for the per-epoch AP@0.35 metric (models/assign_fcaf3d.py's
+    axis_aligned_iou_3d ignores rotation entirely, which the user specifically
+    flagged as wrong for this metric: "GT는 3차원 회전을 포함해야해"). Confirms
+    (1) identical boxes -> IoU~1, (2) far-apart boxes -> IoU=0, (3) matches
+    axis_aligned_iou_3d closely when both boxes are axis-aligned (identity
+    rotation) as a sanity cross-check, and (4) actually USES rotation: two
+    long thin boxes whose axis-aligned bounding boxes overlap a lot but whose
+    true (perpendicular) footprints barely overlap must score much lower here
+    than the axis-aligned function would."""
+    from models.box_utils import oriented_iou_3d_sampled, axis_aligned_iou_3d, quat_to_rotmat
+
+    identity_R = torch.eye(3)
+
+    # (1) identical boxes
+    c, s = torch.tensor([1.0, 2.0, 0.5]), torch.tensor([1.0, 0.8, 1.5])
+    iou_same = oriented_iou_3d_sampled(c, s, identity_R, c, s, identity_R, n_samples_per_axis=12)
+    assert iou_same > 0.95, f"identical boxes should give IoU~1, got {iou_same}"
+
+    # (2) far apart -> 0
+    iou_far = oriented_iou_3d_sampled(c, s, identity_R, c + 100, s, identity_R, n_samples_per_axis=12)
+    assert iou_far == 0.0, f"far-apart boxes should give IoU=0, got {iou_far}"
+
+    # (3) axis-aligned cross-check against the trusted closed-form function
+    c1, s1 = torch.tensor([0.0, 0.0, 0.0]), torch.tensor([2.0, 2.0, 2.0])
+    c2, s2 = torch.tensor([1.0, 0.0, 0.0]), torch.tensor([2.0, 2.0, 2.0])
+    exact = axis_aligned_iou_3d(c1, s1, c2, s2)
+    sampled = oriented_iou_3d_sampled(c1, s1, identity_R, c2, s2, identity_R, n_samples_per_axis=20)
+    assert abs(exact - sampled) < 0.05, f"axis-aligned case: exact={exact:.4f} vs sampled={sampled:.4f} disagree too much"
+
+    # (4) rotation actually matters: two 3x0.3x0.3 boxes centered at the same
+    # point, one along x, one rotated 90 deg about z (so its long axis is
+    # along y) -- their AABBs are both ~3x3x0.3 and overlap almost entirely,
+    # but their true cross-shaped footprints only overlap in a small central
+    # square, so the TRUE IoU should be much smaller than the axis-aligned one.
+    long_box_center = torch.zeros(3)
+    long_box_size = torch.tensor([3.0, 0.3, 0.3])
+    quat_90_about_z = torch.tensor([0.70710678, 0.0, 0.0, 0.70710678])  # (w,x,y,z)
+    R_rotated = quat_to_rotmat(quat_90_about_z.unsqueeze(0))[0]
+
+    aabb_iou = axis_aligned_iou_3d(long_box_center, long_box_size, long_box_center, long_box_size)
+    true_iou = oriented_iou_3d_sampled(long_box_center, long_box_size, identity_R,
+                                        long_box_center, long_box_size, R_rotated, n_samples_per_axis=24)
+    assert aabb_iou > 0.9, f"sanity: identical-size boxes at the same center should have axis-aligned IoU~1, got {aabb_iou}"
+    assert true_iou < 0.15, \
+        (f"cross-shaped overlap of two perpendicular long thin boxes should have a small TRUE IoU, "
+         f"got {true_iou:.4f} (axis-aligned would say {aabb_iou:.4f}) -- rotation isn't being used correctly")
+    print(f"[ok] oriented_iou_3d_sampled: identical={iou_same:.3f}, far-apart={iou_far:.3f}, "
+          f"axis-aligned cross-check exact={exact:.3f} vs sampled={sampled:.3f}, "
+          f"rotation-sensitivity case: axis-aligned={aabb_iou:.3f} vs true(rotated)={true_iou:.3f}")
+
+
 def check_differentiable_iou_matches_eval_only():
     from models.losses_fcaf3d import differentiable_axis_aligned_iou_3d
     from models.box_utils import axis_aligned_iou_3d
@@ -252,6 +305,7 @@ def check_full_fcaf3d_model_forward_backward():
 
 
 if __name__ == "__main__":
+    check_oriented_iou_3d_sampled()
     check_differentiable_iou_matches_eval_only()
     check_assign_multilevel_basic()
     check_fcaf3d_head_shapes()

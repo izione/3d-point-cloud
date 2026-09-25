@@ -154,6 +154,53 @@ def check_backbone_forward_multilevel():
           f"coarse has fewer-or-equal voxels ({coarse_coords.shape[0]} <= {fine_coords.shape[0]}), gradients flow")
 
 
+def check_decode_nms():
+    """Real training run showed precision=0.17 at score_threshold=0.1 (recall
+    0.98) because several nearby voxels routinely fire for the same diver --
+    raising score_threshold alone traded away recall too fast (0.65 recall by
+    threshold=0.3). Confirms decode()'s greedy center-distance NMS actually
+    collapses near-duplicate detections of the same object while leaving
+    genuinely separate objects alone."""
+    from models.detector_fcaf3d import DiverDetectorFCAF3D
+    from config_utils import load_config
+
+    torch.manual_seed(0)
+    cfg = load_config("configs/exp_fcaf3d.yaml")
+    model = DiverDetectorFCAF3D(cfg)
+
+    # two tight clusters (should each collapse to 1 after NMS) representing
+    # two real, well-separated divers, plus their scores so the highest-score
+    # detection in each cluster is the one that should survive.
+    centers = torch.tensor([
+        [1.0, 0.0, 0.0], [1.1, 0.05, -0.05], [0.95, -0.1, 0.0],   # cluster A (diver 1)
+        [8.0, 0.0, 0.0], [8.05, 0.1, 0.0],                          # cluster B (diver 2)
+    ])
+    scores = torch.tensor([0.9, 0.6, 0.5, 0.8, 0.7])
+    pred = {
+        "exist_logit": torch.logit(scores.clamp(1e-4, 1 - 1e-4)).unsqueeze(-1),
+        "center": centers,
+        "log_size": torch.zeros(5, 3),
+        "sixd": torch.tensor([1., 0, 0, 0, 1, 0]).expand(5, 6).clone(),
+        "centerness_logit": torch.logit(torch.ones(5) * 0.999).unsqueeze(-1),  # ~1.0, so score ~= exist_prob
+    }
+    batch_idx = torch.zeros(5, dtype=torch.long)
+
+    no_nms = model.decode([pred], [batch_idx], batch_size=1, score_threshold=0.0, nms_radius=None)
+    assert no_nms[0]["center"].shape[0] == 5, "sanity: no NMS should keep all 5 raw detections"
+
+    nms = model.decode([pred], [batch_idx], batch_size=1, score_threshold=0.0, nms_radius=1.0)
+    assert nms[0]["center"].shape[0] == 2, \
+        f"expected NMS to collapse the 2 clusters to 2 detections, got {nms[0]['center'].shape[0]}"
+    # the surviving detections must be the HIGHEST-scoring one from each cluster
+    kept_centers = nms[0]["center"]
+    assert any(torch.allclose(c, torch.tensor([1.0, 0.0, 0.0]), atol=1e-4) for c in kept_centers), \
+        "NMS should keep cluster A's highest-score detection (center [1,0,0], score 0.9), not a lower-score neighbor"
+    assert any(torch.allclose(c, torch.tensor([8.0, 0.0, 0.0]), atol=1e-4) for c in kept_centers), \
+        "NMS should keep cluster B's highest-score detection (center [8,0,0], score 0.8), not a lower-score neighbor"
+    print(f"[ok] decode() NMS: 5 raw detections (2 clusters) -> 2 after NMS, "
+          f"each cluster's highest-score detection survives")
+
+
 def check_full_fcaf3d_model_forward_backward():
     from config_utils import load_config
     from models.detector_fcaf3d import DiverDetectorFCAF3D
@@ -209,5 +256,6 @@ if __name__ == "__main__":
     check_assign_multilevel_basic()
     check_fcaf3d_head_shapes()
     check_backbone_forward_multilevel()
+    check_decode_nms()
     check_full_fcaf3d_model_forward_backward()
     print("\nall FCAF3D-component checks passed.")

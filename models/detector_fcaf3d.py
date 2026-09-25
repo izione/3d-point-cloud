@@ -96,12 +96,26 @@ class DiverDetectorFCAF3D(nn.Module):
         return losses, level_preds, level_batch_idx, gt_boxes_list
 
     @torch.no_grad()
-    def decode(self, level_preds: list, level_batch_idx: list, batch_size: int, score_threshold: float = 0.1) -> list:
+    def decode(self, level_preds: list, level_batch_idx: list, batch_size: int, score_threshold: float = 0.1,
+               nms_radius: float = None) -> list:
         """Score = exist_prob * centerness (FCAF3D's own inference-time combination,
         see the paper: "scores are multiplied by centerness just before NMS").
-        No NMS here (matches this project's other decode()s -- see
-        models/detector_detr.py::decode's own note that a query/location IS the
-        candidate, no peak-finding needed); a real eval script would add one."""
+
+        nms_radius=None (default) does no NMS at all -- every active voxel
+        across both levels that clears score_threshold is kept independently,
+        same as this project's other decode()s (see
+        models/detector_detr.py::decode's own note that a query/location IS
+        the candidate there, no peak-finding needed -- not true here, since
+        FCAF3D's dense per-location prediction means several nearby voxels
+        routinely fire for the same diver). Measured on the val split: at
+        score_threshold=0.1 alone, recall=0.98 but precision=0.17 (n_det ~6x
+        n_gt); raising score_threshold alone trades recall away fast (0.65
+        recall by threshold=0.3). Passing nms_radius applies greedy
+        center-distance NMS instead (same distance-based matching convention
+        as test.py's own MATCH_DIST_THRESHOLD_M, simpler than a rotated-IoU
+        NMS): process candidates score-descending, keep one only if its
+        center is farther than nms_radius from every already-kept center in
+        that sample."""
         results = [{"center": [], "size": [], "rot_matrix": [], "score": []} for _ in range(batch_size)]
         for pred, batch_idx in zip(level_preds, level_batch_idx):
             scores = torch.sigmoid(pred["exist_logit"].squeeze(-1)) * torch.sigmoid(pred["centerness_logit"].squeeze(-1))
@@ -119,4 +133,21 @@ class DiverDetectorFCAF3D(nn.Module):
             r["size"] = torch.cat(r["size"], dim=0) if r["size"] else torch.zeros(0, 3)
             r["rot_matrix"] = torch.cat(r["rot_matrix"], dim=0) if r["rot_matrix"] else torch.zeros(0, 3, 3)
             r["score"] = torch.cat(r["score"], dim=0) if r["score"] else torch.zeros(0)
+
+        if nms_radius is not None:
+            for r in results:
+                n = r["center"].shape[0]
+                if n == 0:
+                    continue
+                order = torch.argsort(r["score"], descending=True)
+                kept = []
+                for i in order.tolist():
+                    ci = r["center"][i]
+                    if all((ci - r["center"][j]).norm().item() > nms_radius for j in kept):
+                        kept.append(i)
+                kept = torch.as_tensor(kept, dtype=torch.long)
+                r["center"] = r["center"][kept]
+                r["size"] = r["size"][kept]
+                r["rot_matrix"] = r["rot_matrix"][kept]
+                r["score"] = r["score"][kept]
         return results

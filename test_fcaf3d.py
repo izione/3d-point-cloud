@@ -28,13 +28,13 @@ from test import (
 
 
 @torch.no_grad()
-def collect_pr_data(model, loader, device):
+def collect_pr_data(model, loader, device, nms_radius=None):
     model.eval()
     frame_data = []
     total_gt = 0
     for batch in loader:
         level_preds, _, level_batch_idx, gt_boxes_list, batch_size = model.forward(batch, device)
-        dets = model.decode(level_preds, level_batch_idx, batch_size, score_threshold=0.0)
+        dets = model.decode(level_preds, level_batch_idx, batch_size, score_threshold=0.0, nms_radius=nms_radius)
         for b, gt_boxes in enumerate(gt_boxes_list):
             gt_boxes = gt_boxes.cpu()
             det = dets[b]
@@ -44,7 +44,7 @@ def collect_pr_data(model, loader, device):
 
 
 @torch.no_grad()
-def evaluate(model, loader, device, score_threshold):
+def evaluate(model, loader, device, score_threshold, nms_radius=None):
     model.eval()
     overall = _new_accumulator()
     per_person = defaultdict(_new_accumulator)
@@ -52,7 +52,7 @@ def evaluate(model, loader, device, score_threshold):
 
     for batch in loader:
         level_preds, _, level_batch_idx, gt_boxes_list, batch_size = model.forward(batch, device)
-        dets = model.decode(level_preds, level_batch_idx, batch_size, score_threshold=score_threshold)
+        dets = model.decode(level_preds, level_batch_idx, batch_size, score_threshold=score_threshold, nms_radius=nms_radius)
 
         for b, gt_boxes in enumerate(gt_boxes_list):
             gt_boxes = gt_boxes.cpu()
@@ -116,6 +116,8 @@ def main():
     parser.add_argument("--config", default=None, help="defaults to the config stored in the checkpoint")
     parser.add_argument("--split", default="test", choices=["train", "val", "test"])
     parser.add_argument("--score_threshold", type=float, default=0.1)
+    parser.add_argument("--nms_radius", type=float, default=None,
+                         help="greedy center-distance NMS radius in meters (default: no NMS)")
     parser.add_argument("--batch_size", type=int, default=4)
     parser.add_argument("--per_frame_out", default=None)
     parser.add_argument("--pr_curve_out", default=None)
@@ -131,8 +133,9 @@ def main():
     ds = SonarDiverDataset(cfg, args.split)
     loader = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=2, collate_fn=collate_fn, pin_memory=True)
 
-    print(f"evaluating {args.split} split ({len(ds)} frames) from {args.checkpoint} (epoch {ckpt.get('epoch')})")
-    overall_metrics, per_person_metrics, per_frame = evaluate(model, loader, device, args.score_threshold)
+    print(f"evaluating {args.split} split ({len(ds)} frames) from {args.checkpoint} (epoch {ckpt.get('epoch')}), "
+          f"nms_radius={args.nms_radius}")
+    overall_metrics, per_person_metrics, per_frame = evaluate(model, loader, device, args.score_threshold, args.nms_radius)
 
     print_metrics("overall", overall_metrics)
     for person, metrics in per_person_metrics.items():

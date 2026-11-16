@@ -72,10 +72,21 @@ def build_dataloader(cfg, split, batch_size, shuffle, num_workers):
 
 def save_checkpoint(path, model, optimizer, scheduler, epoch, step, cfg, epoch_complete):
     """epoch_complete=True only when saved *after* finishing all of `epoch`'s
-    batches (the epoch-boundary checkpoints). Step-checkpoints save mid-epoch,
-    so resuming from one must re-run that whole epoch rather than skip to the
-    next -- there's no record of exactly which batches were already seen."""
+    batches (the epoch-boundary checkpoints). Step-checkpoints save mid-epoch;
+    train_detr.py's --resume skips that many already-trained batches when
+    resuming one (train.py's own resume path still just re-runs the whole
+    epoch -- there's no equivalent skip logic there).
+
+    Writes to a temp file and os.replace()s it into place -- os.replace is
+    atomic (same filesystem), so a hard-killed process (e.g. a foreground
+    training chunk hitting Bash's `timeout`, see train_detr.py's own comment
+    on why long runs here are chunked) can only ever leave behind an orphaned
+    .tmp file, never a truncated/corrupted checkpoint at `path` itself. Hit
+    this for real: a `timeout`-killed chunk left a ~150MB checkpoint where
+    every other one was ~233MB, and torch.load failed on it with a zip
+    central-directory error."""
     path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
     torch.save({
         "model": model.state_dict(),
         "optimizer": optimizer.state_dict(),
@@ -85,7 +96,8 @@ def save_checkpoint(path, model, optimizer, scheduler, epoch, step, cfg, epoch_c
         "epoch_complete": epoch_complete,
         "cfg": cfg,
         "attention_kind": slotformer.ATTENTION_KIND,
-    }, path)
+    }, tmp_path)
+    os.replace(tmp_path, path)
 
 
 @torch.no_grad()

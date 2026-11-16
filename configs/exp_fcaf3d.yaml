@@ -1,0 +1,60 @@
+# Full FCAF3D-style (arXiv 2112.00322) reproduction: dense anchor-free
+# multi-level head (models/detector_fcaf3d.py) instead of the DETR
+# set-prediction head in configs/exp_detr_head.yaml -- no decoder, no
+# Hungarian matcher, no query denoising. Box parametrization stays this
+# project's own (center + log-size + 6D rotation) since FCAF3D's own
+# face-distance/Mobius-strip encoding assumes a single heading angle, which
+# doesn't cover this project's full 3D orientation -- see
+# models/heads_fcaf3d.py's docstring.
+BASE_CONFIG: default.yaml
+
+DATA:
+  POINT_CLOUD_RANGE: [0.0, -5.0, -2.5, 12.0, 5.0, 2.5]
+
+VFE:
+  TYPE: mvfe
+
+BACKBONE:
+  # Same FCAF3D-style U-Net encoder-decoder as exp_detr_head.yaml -- see
+  # models/backbone3d_unet_spconv.py. forward_multilevel() exposes BOTH the
+  # fine (decoded, 128ch, stride 2) and coarse (raw deepest encoder, 256ch,
+  # stride 4) levels to the head, unlike exp_detr_head.yaml's DETR pipeline
+  # which only ever uses the fine level.
+  TYPE: sparse_unet
+  STAGE_CHANNELS: [128, 256]
+  NUM_BLOCKS_PER_STAGE: 3
+  DOWNSAMPLE_KERNEL: 3
+  DOWNSAMPLE_STRIDE: 2
+
+FCAF3D_HEAD:
+  HIDDEN_DIM: 128
+  NUM_HIDDEN_LAYERS: 1   # per-branch conv depth, weights shared across both levels
+
+ASSIGN:
+  # FCAF3D's own Nloc=33/18-location numbers are tuned for indoor-scene-scale
+  # point counts (Npts=100k); this dataset's voxel counts per frame are far
+  # smaller, so both are scaled down heavily. MIN_LOCATIONS: a GT box needs at
+  # least this many covering voxels at the COARSE level before it's assigned
+  # there instead of the fine level. CENTER_SAMPLE_RADIUS: only voxels within
+  # this fraction of the box's own half-size (from its center) count as
+  # positive -- 1.0 would mean "anywhere inside the box".
+  MIN_LOCATIONS: 4
+  CENTER_SAMPLE_RADIUS: 0.6
+
+FCAF3D_LOSS:
+  WEIGHTS:
+    cls: 1.0
+    iou: 1.0
+    center: 1.0        # kept alongside IoU (FCAF3D uses IoU alone) since IoU's
+    size: 0.5          # gradient vanishes for near-zero-overlap predictions,
+                        # which matching queries start at -- see exp_detr_head.yaml's
+                        # own history of a box-regression term that never learned.
+    rotation: 1.0
+    centerness: 1.0
+  CLS_ALPHA: 0.25
+  CLS_GAMMA: 2.0
+
+OPTIMIZATION:
+  BATCH_SIZE: 8
+  LR: 0.006
+  NUM_WORKERS: 2

@@ -1,0 +1,112 @@
+# DETR-style set-prediction head (models/detector_detr.py) -- adapted from
+# SparseVoxFormer (arXiv 2503.08092) as closely as this dataset's scale
+# reasonably allows. Overrides DATA.POINT_CLOUD_RANGE to match this sonar
+# rig's actual coverage; everything else in DATA/BACKBONE/SLOTFORMER/
+# OPTIMIZATION stays as configs/default.yaml so the trunk/training regime
+# still matches the existing dense-head baseline as closely as possible.
+BASE_CONFIG: default.yaml
+
+DATA:
+  # x:[0,12], y:[-5,5], z:[-2.5,2.5] meters -- this sonar's actual field of
+  # view/range, tighter than default.yaml's [0,16.2]x[-11.4,11.4]x[-5.6,5.6]
+  # (that range was tuned for the dense-head baseline's own experiments).
+  # VOXEL_SIZE stays 0.2m (inherited) -> grid (60,50,25).
+  POINT_CLOUD_RANGE: [0.0, -5.0, -2.5, 12.0, 5.0, 2.5]
+
+VFE:
+  # Reverted to mVFE for this experiment -- PointAttentionVFE (k=16 KNN +
+  # self/cross-attention on raw points, see models/vfe_point_attn.py) was
+  # tried alongside the FCAF3D-style U-Net backbone below and the combined
+  # step time (~3.9s) was ~9x the plain single-stage backbone's. Isolating
+  # variables: keep the backbone change, drop back to mVFE first to measure
+  # the U-Net backbone alone before reintroducing PointAttentionVFE as its
+  # own separate benchmark.
+  TYPE: mvfe                # SparseVoxFormer's "mVFE" (models/vfe_m.py): base VFE's
+                             # 10D input + per-voxel std-dev(3) + point count(1) = 14D
+
+BACKBONE:
+  # FCAF3D-style (arXiv 2112.00322) encoder-decoder backbone instead of
+  # default.yaml's single down-conv+resblocks stage -- see
+  # models/backbone3d_unet.py for why this doesn't need FCAF3D's own
+  # generative-conv+pruning neck machinery. 2 encoder stages (128 then 256
+  # channels, stride 2 each = total encoder stride 4) + 1 decoder stage that
+  # upsamples the 256-channel level back into the 128-channel skip
+  # connection -- net total_stride stays 2, same as default.yaml's single
+  # stage, so REFINEMENT's effective-voxel-size-tuned settings below don't
+  # need retuning. Keeps full 3D (x,y,z) sparse coords throughout, no BEV.
+  TYPE: sparse_unet
+  STAGE_CHANNELS: [128, 256]
+  NUM_BLOCKS_PER_STAGE: 3
+  DOWNSAMPLE_KERNEL: 3
+  DOWNSAMPLE_STRIDE: 2
+
+DETR_HEAD:
+  NUM_QUERIES: 10          # working assumption: at most 10 objects/frame (max observed so far is
+                            # ~4-5 divers/frame; this leaves some margin without going back to 100).
+  NUM_DECODER_LAYERS: 6    # matches the paper's decoder depth
+  NUM_HEADS: 4
+  HIDDEN_DIM: 128          # defaults to BACKBONE.STAGE_CHANNELS[-1] (channels) if omitted
+  NUM_HIDDEN_LAYERS: 1     # per-head MLP depth in models/heads_detr.py
+
+REFINEMENT:
+  # Sparse-token refinement stage run after the backbone, before the DETR
+  # decoder. SparseVoxFormer's own paper uses DSVT (models/dsvt.py) here for
+  # its Deep Fusion Module -- switch TYPE to slotformer to fall back to this
+  # codebase's pre-existing SlotFormerBackbone (a different paper, FSHNet)
+  # for comparison; SLOTFORMER's own config section below is then read instead.
+  TYPE: dsvt
+  # Window shape in BACKBONE-OUTPUT voxel units (effective voxel size 0.4m at
+  # this config's grid) -- 10x10x10 voxels = a 4m cube. Single shape (not
+  # hybrid) for now, applied to every block. z is still not collapsed to 1
+  # (grid's own z extent is only ~13, so a 10-deep window already covers
+  # most of it), matching the paper's own DFM usage of not flattening z either.
+  WINDOW_SHAPES: [[10, 10, 10]]
+  TAU: 32              # max voxels per set (paper: 36 for their pillar variant, 48 for voxel --
+                        # picked lower since this dataset's voxels are far sparser than outdoor LiDAR)
+  NUM_BLOCKS: 4         # matches the paper's Waymo-pillar depth (2 layers/block = 8 attention layers total)
+  NUM_HEADS: 4
+
+MATCHER:
+  COST_CLS: 1.0
+  COST_CENTER: 5.0
+  COST_SIZE: 2.0
+  COST_ROT: 2.0
+
+DENOISING:
+  # DN-DETR-style auxiliary queries built directly from noised GT boxes
+  # (models/denoising.py), matching the paper's own "query denoising" training
+  # trick. Training-only -- has no effect on decode()/inference.
+  ENABLED: true
+  NUM_GROUPS: 5             # independently-noised copies of each frame's GT boxes per step
+  CENTER_NOISE_SCALE: 0.4   # center jitter, as a fraction of the GT box's own half-size
+  SIZE_NOISE_SCALE: 0.4     # multiplicative size jitter fraction
+  ROT_NOISE_DEG: 15.0       # max random rotation perturbation angle
+  LOSS_WEIGHT: 1.0          # scales the denoising loss terms before adding to the matching loss's total
+
+DETR_LOSS:
+  WEIGHTS:
+    cls: 1.0
+    center: 2.0
+    size: 1.0
+    rotation: 1.0
+  CLS_ALPHA: 0.25          # standard RetinaNet/DETR focal-loss defaults (hard 0/1 target,
+  CLS_GAMMA: 2.0            # not this repo's heatmap-style FOCAL_ALPHA/BETA -- see losses_detr.py)
+  AUX_LOSS_WEIGHT: 1.0      # weight on each of the 5 earlier decoder layers' own matcher+loss
+                            # (original DETR's own ablation: dropping this significantly slows
+                            # convergence -- confirmed here too: center/size loss plateaued for
+                            # 10+ epochs without it, see models/detector_detr.py::loss())
+
+OPTIMIZATION:
+  # default.yaml's BATCH_SIZE=64/LR=0.048 were tuned for the DENSE head's
+  # per-voxel conv cost on an RTX 2070 -- confirmed (2026-09-21 Colab run) that
+  # BATCH_SIZE=64 OOMs within a few steps on a 14.56GiB T4 with this DETR head,
+  # even on the pure-PyTorch backbone fallback. The decoder's cross-attention
+  # costs O(B x T_max x Q) memory per layer (T_max = that batch's largest
+  # active-token count, Q = NUM_QUERIES + denoising queries) -- a fundamentally
+  # different profile from the dense head's conv, so its batch size doesn't
+  # transfer. Retune upward only after checking real headroom on your GPU (the
+  # notebook's step 5 speed/memory check) -- this is a conservative starting
+  # point, not a measured optimum.
+  BATCH_SIZE: 8
+  LR: 0.006                # linear-scaled from default.yaml's own anchor (LR=0.003 at BATCH_SIZE=4)
+  NUM_WORKERS: 2            # matches the "suggested max workers" warning on a 2-CPU-core Colab instance

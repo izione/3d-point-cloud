@@ -1,0 +1,11 @@
+# Ablation of exp_fcaf3d.yaml: same trunk/loss/optimization/scene-disjoint
+# split, but the coarse level is dropped entirely (models/detector_fcaf3d.py's
+# self.single_level switch) -- every GT box is assigned via fine-level-only
+# FCOS-style center sampling, no multi-level routing at all. Answers whether
+# FCAF3D's multi-level assignment actually earns its keep on this
+# single-class (diver-only) dataset, where GT box size varies far less than
+# the paper's original indoor-scene classes (chair/sofa/bed/...).
+BASE_CONFIG: exp_fcaf3d.yaml
+
+FCAF3D_HEAD:
+  SINGLE_LEVEL: true

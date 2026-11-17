@@ -1,0 +1,196 @@
+# Diver detection model config
+# Captures every architecture/training decision made in the design conversation.
+#
+# NOTE: some fields below are marked "# [not read by code]" -- they document a
+# decision but the actual behavior is hardcoded in the corresponding .py file
+# (matches what's written here, but editing the value here does nothing; edit
+# the .py file instead). Everything else IS actually read from this file.
+
+DATA:
+  # 2026-09-28: swapped to a corrected re-label of the dataset (fixes the
+  # frozen/stale auto-tracked rotation labels found this session -- e.g. the
+  # old Person4/scene_0077 had rotation quaternions held byte-identical for
+  # 59/85/97-frame stretches while the diver kept moving; the new copy marks
+  # those lost-track segments "objects": [] instead of repeating a stale box).
+  # This also corrected a person-folder misassignment: scene_0077/0088/0093
+  # were filed under Person4 in the old copy but are actually Person1's (see
+  # TEST_SCENES below) -- verified every other person's scene set is
+  # otherwise identical between the two copies. The old copy is still at
+  # ../labeling-tool-main/dataset (unused now that ROOT points elsewhere) --
+  # a lingering orphaned DataLoader worker process held a file lock that
+  # blocked renaming/deleting it; safe to delete by hand once nothing has it
+  # open (e.g. after a reboot, or closing whatever still has it open).
+  # 2026-10-08: dataset_new folder was consolidated back into
+  # labeling-tool-main/dataset (the old locked copy was freed/replaced) --
+  # the zip's own top-level "dataset" folder is still nested one level in,
+  # so the real root is dataset/dataset, not dataset itself.
+  ROOT: "../labeling-tool-main/dataset/dataset"   # PersonX/scene_XXXX/{sonar,labels} -- relative to 3d-point-cloud/ ; change to absolute path or Drive mount on Colab
+  VOXEL_SIZE: [0.2, 0.2, 0.2]   # 2026-08-31: BACKBONE below is single-stage/stride-2, so 0.2 reproduces
+                                 # the last committed (stem.py-based) checkpoint's proven 0.4m effective
+                                 # resolution and precision=0.68/recall=0.71 (see git history/
+                                 # per_frame_val.json). Tried 0.1 (0.2m effective, finer/never validated)
+                                 # but training time roughly doubled (more active voxels -> smaller batch
+                                 # sizes needed -> more steps/epoch) for an unproven accuracy gain -- back
+                                 # to 0.2 for now. Revisit 0.1 later once 0.2 has a real baseline result.
+  POINT_CLOUD_RANGE: [0.0, -11.4, -5.6, 16.2, 11.4, 5.6]   # xmin,ymin,zmin,xmax,ymax,zmax
+  # Canonical scene-level 3-way split (2026-09-26), copied from the sibling
+  # eugene/SonarVoxNet project's tools/prepare_data.py so both projects use the
+  # exact same scene assignment -- see configs/splits/scene_split.json for the
+  # reference copy. TRAIN/VAL/TEST are all genuine held-out whole scenes now
+  # (data/dataset.py::SonarDiverDataset picks the list matching the requested
+  # split directly, no frame-level shuffling): no frame from a val or test
+  # scene ever appears in train. TEST_SCENES is unchanged from before this
+  # date (see git history below this comment for its own prior history);
+  # TRAIN_SCENES/VAL_SCENES replace the old pooled TRAINVAL_SCENES +
+  # VAL_FRAME_RATIO/SPLIT_SEED frame-level random split -- every result from
+  # before 2026-09-26 was measured under that old split and isn't directly
+  # comparable to runs after it.
+  TEST_SCENES:
+    - "Person2/scene_0035"
+    - "Person3/scene_0043"
+    - "Person4/scene_0055"
+    - "Person3/scene_0067"
+    - "Person1/scene_0077"   # was "Person4/scene_0077" -- corrected 2026-09-28, see DATA's own comment
+    - "Person1/scene_0088"   # was "Person4/scene_0088"
+    - "Person2/scene_0089"
+    - "Person1/scene_0093"   # was "Person4/scene_0093"
+  TRAIN_SCENES:
+    - "Person2/scene_0050"
+    - "Person2/scene_0091"
+    - "Person2/scene_0079"
+    - "Person2/scene_0078"
+    - "Person1/scene_0068"
+    - "Person1/scene_0063"
+    - "Person3/scene_0022"
+    - "Person3/scene_0080"
+    - "Person4/scene_0074"
+    - "Person1/scene_0036"
+    - "Person1/scene_0042"
+    - "Person3/scene_0048"
+    - "Person3/scene_0072"
+    - "Person4/scene_0021"
+    - "Person3/scene_0082"
+    - "Person1/scene_0000"
+    - "Person1/scene_0044"
+    - "Person3/scene_0070"
+    - "Person2/scene_0076"
+    - "Person4/scene_0065"
+    - "Person4/scene_0081"
+  VAL_SCENES:
+    - "Person2/scene_0009"
+    - "Person3/scene_0019"
+    - "Person1/scene_0049"
+    - "Person3/scene_0064"
+    - "Person4/scene_0075"
+    - "Person4/scene_0090"
+    - "Person3/scene_0092"
+  # 2026-10-09: scene_0081/0090/0075 were briefly missing/partial after a disk-space-driven dataset
+  # consolidation mishap (see git history / chat for 2026-10-09 if curious) -- TRAIN/VAL_SCENES were
+  # temporarily patched to work around it (scene_0069 swapped in, 0090/0075 dropped), then reverted back
+  # to this original list once a clean re-extraction confirmed all three scenes are intact again.
+  AUGMENTATION: false          # [not read by code] no augmentation is implemented at all -- nothing to toggle
+
+VFE:
+  NUM_FILTERS: [64, 64]        # 2-layer PFN, 10D augmented input -> 64D output -- actually read (models/vfe.py)
+  NUM_POINT_FEATURES: 4        # [not read by code] x,y,z,intensity -- fixed in models/vfe.py
+  WITH_DISTANCE: false         # [not read by code] fixed in models/vfe.py (10D = xyz+intensity+cluster_offset+center_offset, no distance term)
+  USE_ABSOLUTE_XYZ: true       # [not read by code] fixed in models/vfe.py
+
+BACKBONE:
+  # Single-stage 3D sparse conv backbone (models/backbone3d.py) -- reverted
+  # 2026-08-31 to match the old committed models/stem.py's depth/capacity
+  # exactly (see DATA.VOXEL_SIZE's comment for why: the 4-stage/stride-16
+  # version this replaced tanked precision/recall). One strided
+  # SparseConv3dDown (changes channels + downsamples x,y,z together --
+  # isotropic, NOT z-only like FSHNet original) followed by
+  # NUM_BLOCKS_PER_STAGE SubMConv3d residual blocks. No 2D/BEV backbone
+  # follows -- per-voxel 3D coords (incl. z) reach the head unchanged, so
+  # height information is never collapsed away.
+  STAGE_CHANNELS: [128]        # actually read -- single stage, matches old STEM.OUT_CHANNELS
+  NUM_BLOCKS_PER_STAGE: 3       # actually read -- matches old STEM.NUM_BASIC_BLOCKS
+  DOWNSAMPLE_KERNEL: 3           # actually read
+  DOWNSAMPLE_STRIDE: 2           # actually read -- total stride = 2 (one stage), matching the old stem
+  TYPE: auto                     # actually read (models/backbone3d_auto.py) -- "auto" (spconv if it's
+                                  # installed and actually works on this GPU, else the pure-PyTorch
+                                  # fallback -- see README) or "dense" (nn.Conv3d over the full voxel
+                                  # grid, no sparsity at all -- see configs/exp_dense.yaml). Experiment
+                                  # configs comparing backbone/SlotFormer combinations: configs/exp_*.yaml.
+  NAME: Sparse3D                 # [not read by code] descriptive only
+
+SLOTFORMER:
+  # Attention-based refinement stage that runs AFTER the 3D sparse conv backbone
+  # above, on its output voxels (channels = BACKBONE.STAGE_CHANNELS[-1]) -- see
+  # models/slotformer.py. Unchanged from before the 3D backbone rework.
+  ENABLED: true                 # actually read -- set false to skip SlotFormer entirely. The dense backbone
+                                 # already has a whole-grid receptive field (that's what SlotFormer exists to
+                                 # give the sparse backbones), so configs/exp_dense.yaml sets this false.
+  WIN_SIZE: 12                  # actually read -- in 3D-backbone-output voxels (=4.8m at the current 0.4m
+                                 # effective resolution, matching the old stem-based checkpoint's window)
+  NUM_CYCLES: 1                 # actually read -- x,y,z once = 3 SFLayers total; one full x->y->z pass
+                                 # already gives every voxel a global 3D receptive field, so this trades
+                                 # away representational depth (not receptive field) to fight overfitting.
+                                 # was 2 (6 layers) -- bump back up if train loss stops dropping enough.
+  NUM_HEADS: 4                  # actually read
+  NAME: SlotFormer              # [not read by code] descriptive only
+  DIRECTIONS: [x, y, z]         # [not read by code] direction cycling is hardcoded in models/slotformer.py
+  ATTENTION: softmax            # [not read by code] toggle is models/slotformer.py's ATTENTION_KIND module var ("softmax" or "linear"), not this key
+  POS_ENCODING:                 # [not read by code] sinusoidal-sum PE is hardcoded in models/slotformer.py SFLayer
+    TYPE: sinusoidal_sum
+    TEMPERATURE: 10000           # matches the hardcoded default in SFLayer.__init__, but changing this value here does nothing
+
+DENSE_HEAD:
+  CENTER_HEAD:
+    NUM_CONV: 2                  # actually read
+    OUTPUT_CHANNELS: 1           # actually read
+    BIAS_INIT: focal             # [not read by code] FOCAL_BIAS_INIT is hardcoded in models/heads.py
+  OFFSET_HEAD:
+    NUM_CONV: 2                  # actually read
+    OUTPUT_CHANNELS: 3           # actually read
+  BOX_HEAD:
+    NUM_CONV: 2                  # actually read
+    OUTPUT_CHANNELS: 7           # actually read -- w,l,h,qw,qx,qy,qz
+  SHARED_CONV_CHANNELS: 128      # [not read by code] there is no separate shared trunk before the 3 heads -- heads take the backbone's last-stage channel count (BACKBONE.STAGE_CHANNELS[-1]) directly
+
+ASSIGNER:
+  CLS_WEIGHT: 1.0                # actually read
+  REG_WEIGHT: 3.0                # actually read
+  MIN_POSITIVES: 1               # actually read
+  NAME: DynamicCornerAssign      # [not read by code] descriptive only
+  CANDIDATE_POOL: in_gt_box      # [not read by code] voxels inside each GT's own oriented box in models/assign.py (SimOTA-style; nearest-voxel fallback if the box is smaller than a voxel), NOT top-5 like FSHNet or the whole active set
+  REG_COST: corner_distance      # [not read by code] always corner-distance in models/assign.py (RWIoU is quaternion-incompatible)
+
+LOSS:
+  WEIGHTS:
+    center: 1.0
+    corner_aux: 0.5
+    offset: 1.0
+    size: 1.0                    # log-scale L1
+    rotation: 1.0                 # double-cover-safe quaternion loss
+  FOCAL_ALPHA: 2
+  FOCAL_BETA: 4
+
+OPTIMIZATION:
+  LR: 0.048                     # linear-scaled with BATCH_SIZE 4->64 (0.003 * 16). This is the OneCycleLR
+                                 # peak (DIV_FACTOR/PCT_START below still control warmup) -- if loss spikes
+                                 # or diverges early, try sqrt scaling instead (~0.012) and back off from there.
+  WEIGHT_DECAY: 0.01
+  MOMS: [0.95, 0.85]
+  PCT_START: 0.1
+  DIV_FACTOR: 100
+  GRAD_NORM_CLIP: 10
+  BATCH_SIZE: 64                 # measured on RTX 2070 (8GB), sparse-no-slotformer config: 64->~5.8GB/71%
+                                  # (safe headroom); 80 and 96 both measured 94-96% -- real batches vary in
+                                  # active-voxel count per scene enough that either risks an OOM mid-run
+  NUM_EPOCHS: 20                # reverted resolution (0.4m effective) means far more active voxels
+                                 # survive to the head than the old 4-stage/16x backbone, so wall-clock
+                                 # per epoch is much higher now -- 20 epochs keeps the 3 sparse experiments
+                                 # (see exp_*.yaml's own BATCH_SIZE/LR) in the ~9-20h range instead of 18-40h
+  CKPT_EVERY_N_EPOCHS: 1
+  CKPT_EVERY_N_STEPS: 500        # extra safety checkpoint mid-epoch
+  NUM_WORKERS: 10  # this Colab instance only got 2 CPU cores -- leave 1 for the
+                  # main process. Try 2 and compare; more than that will just
+                  # contend with itself, not help.
+  OPTIMIZER: adamw_onecycle      # [not read by code] AdamW + OneCycleLR is hardcoded in train.py
+
+POST_PROCESSING:
+  NMS: false                     # [not read by code] no NMS is implemented at all (decode.py is local-max peaks only)

@@ -1,0 +1,21 @@
+# Ablation of exp_fcaf3d_single_level_heatmap.yaml: adds the "corner
+# auxiliary" loss (models/losses.py's original corner_loss, ported into
+# compute_fcaf3d_loss via CORNER_AUX) -- an extra MSE between a Gaussian
+# heatmap rendered from the GT boxes' 8 corners and one rendered from the
+# PREDICTED boxes' 8 corners, supervising box extent/orientation spatially
+# in addition to the direct center/size/rotation regression terms. Reuses
+# GAUSSIAN_SIGMA_M as the corner heatmap's sigma too.
+BASE_CONFIG: exp_fcaf3d_single_level_heatmap.yaml
+
+FCAF3D_HEAD:
+  CORNER_AUX: true
+
+FCAF3D_LOSS:
+  WEIGHTS:
+    cls: 1.0
+    iou: 1.0
+    center: 1.0
+    size: 0.5
+    rotation: 1.0
+    centerness: 1.0
+    corner_aux: 1.0

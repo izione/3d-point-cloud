@@ -1,0 +1,124 @@
+import torch
+
+# Fixed local corner ordering (8,3): every ± combination of (l/2, w/2, h/2).
+# Predicted and GT corners MUST use this same template so index i always means
+# "the same relative corner" on both sides -- that's what makes a plain
+# per-index L2 distance a meaningful (and rotation-sensitive) cost.
+_SIGNS = torch.tensor(
+    [[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)],
+    dtype=torch.float32,
+)
+
+
+def quat_normalize(q: torch.Tensor) -> torch.Tensor:
+    return q / q.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+
+
+def quat_to_rotmat(q: torch.Tensor) -> torch.Tensor:
+    """q: (...,4) as (w,x,y,z), normalized. Returns (...,3,3)."""
+    q = quat_normalize(q)
+    w, x, y, z = q[..., 0], q[..., 1], q[..., 2], q[..., 3]
+    R = torch.stack([
+        1 - 2 * (y ** 2 + z ** 2), 2 * (x * y - w * z), 2 * (x * z + w * y),
+        2 * (x * y + w * z), 1 - 2 * (x ** 2 + z ** 2), 2 * (y * z - w * x),
+        2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x ** 2 + y ** 2),
+    ], dim=-1)
+    return R.reshape(*q.shape[:-1], 3, 3)
+
+
+def box_to_corners(center: torch.Tensor, size: torch.Tensor, quat: torch.Tensor) -> torch.Tensor:
+    """center: (N,3), size: (N,3) [length,width,height], quat: (N,4) [w,x,y,z].
+    Returns corners (N,8,3) in the fixed order given by _SIGNS."""
+    device = center.device
+    signs = _SIGNS.to(device)                       # (8,3)
+    local = signs[None, :, :] * (size[:, None, :] / 2)   # (N,8,3)
+    R = quat_to_rotmat(quat)                         # (N,3,3)
+    world = torch.einsum("nij,nkj->nki", R, local) + center[:, None, :]
+    return world
+
+
+def quat_geodesic_loss(q_pred: torch.Tensor, q_gt: torch.Tensor) -> torch.Tensor:
+    """Double-cover-safe angular distance in [0, pi], per row. q_*: (N,4)."""
+    q_pred = quat_normalize(q_pred)
+    q_gt = quat_normalize(q_gt)
+    dot = (q_pred * q_gt).sum(dim=-1).abs().clamp(max=1.0 - 1e-7)
+    return 2 * torch.acos(dot)
+
+
+def corner_distance_cost(pred_center, pred_size, pred_quat, gt_center, gt_size, gt_quat):
+    """Mean per-corner L2 distance between two (broadcast-compatible) boxes.
+    All inputs (N,3)/(N,3)/(N,4); returns (N,) cost in meters."""
+    pred_corners = box_to_corners(pred_center, pred_size, pred_quat)
+    gt_corners = box_to_corners(gt_center, gt_size, gt_quat)
+    return (pred_corners - gt_corners).norm(dim=-1).mean(dim=-1)
+
+
+def points_in_oriented_box(points: torch.Tensor, center: torch.Tensor, size: torch.Tensor, quat: torch.Tensor) -> torch.Tensor:
+    """points: (M,3) world points. center/size/quat: (3,)/(3,)/(4,) for ONE box.
+    Returns (M,) bool -- which points fall inside that oriented box (used as
+    the SimOTA-style spatial candidate filter in models/assign.py)."""
+    R = quat_to_rotmat(quat.unsqueeze(0))[0]     # (3,3), local -> world
+    local = (points - center[None, :]) @ R       # world -> local: R^T @ diff, done as diff @ R
+    half = size / 2
+    return (local.abs() <= half[None, :]).all(dim=-1)
+
+
+def oriented_iou_3d_sampled(center1: torch.Tensor, size1: torch.Tensor, R1: torch.Tensor,
+                             center2: torch.Tensor, size2: torch.Tensor, R2: torch.Tensor,
+                             n_samples_per_axis: int = 10) -> float:
+    """Approximate rotation-AWARE 3D IoU via a deterministic regular grid over
+    the union axis-aligned bounding box of both (rotated) boxes -- unlike
+    axis_aligned_iou_3d, two boxes that only overlap when rotation is ignored
+    (or that are heavily rotated so their true footprint is much smaller than
+    their AABB) are scored correctly here. center/size: (3,) each, R: (3,3)
+    rotation matrix (not quaternion -- callers already have matrices from
+    rotation6d.sixd_to_matrix / quat_to_rotmat). No gradient (grid membership
+    is a hard threshold) -- eval-only, like axis_aligned_iou_3d.
+
+    Accurate to within the grid's own resolution (n_samples_per_axis=10 -> 1000
+    sample points spanning the union box every call); a per-epoch health-check
+    metric, not meant to replace a closed-form rotated-box intersection."""
+    def corners(center, size, R):
+        signs = _SIGNS.to(center.device)                     # (8,3)
+        local = signs * (size[None, :] / 2)                  # (8,3)
+        return local @ R.T + center[None, :]                 # (8,3)
+
+    def inside(points, center, size, R):
+        local = (points - center[None, :]) @ R                # world -> local
+        half = size / 2
+        return (local.abs() <= half[None, :]).all(dim=-1)
+
+    c1, c2 = corners(center1, size1, R1), corners(center2, size2, R2)
+    lo = torch.minimum(c1.min(0).values, c2.min(0).values)
+    hi = torch.maximum(c1.max(0).values, c2.max(0).values)
+    if (hi <= lo).any():
+        return 0.0
+
+    lin = [torch.linspace(lo[d].item(), hi[d].item(), n_samples_per_axis, device=center1.device) for d in range(3)]
+    grid = torch.stack(torch.meshgrid(*lin, indexing="ij"), dim=-1).reshape(-1, 3)  # (N,3)
+
+    in1 = inside(grid, center1, size1, R1)
+    in2 = inside(grid, center2, size2, R2)
+    inter = (in1 & in2).sum().item()
+    union = (in1 | in2).sum().item()
+    return inter / union if union > 0 else 0.0
+
+
+def axis_aligned_iou_3d(center1, size1, center2, size2) -> float:
+    """Volume-only 3D IoU: both boxes treated as axis-aligned cuboids (rotation
+    ignored), closed-form -- no sampling. center/size: (3,) each.
+
+    Trade-off vs a rotation-aware IoU: two boxes that are actually disjoint but
+    whose axis-aligned extents overlap will get a nonzero IoU here (and a heavily
+    rotated box's true footprint is smaller than its AABB, so overlap is
+    overestimated). Accepted for eval-speed; label assignment during training
+    already ignores IoU too (models/assign.py uses corner-distance, not IoU)."""
+    lo1, hi1 = center1 - size1 / 2, center1 + size1 / 2
+    lo2, hi2 = center2 - size2 / 2, center2 + size2 / 2
+    overlap = (torch.minimum(hi1, hi2) - torch.maximum(lo1, lo2)).clamp(min=0)
+    inter_vol = overlap.prod().item()
+
+    vol1 = size1.prod().item()
+    vol2 = size2.prod().item()
+    union_vol = vol1 + vol2 - inter_vol
+    return inter_vol / union_vol if union_vol > 1e-9 else 0.0

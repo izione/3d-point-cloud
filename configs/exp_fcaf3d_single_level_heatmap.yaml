@@ -1,0 +1,14 @@
+# Ablation of exp_fcaf3d_single_level.yaml: replaces the hard-0/1 existence
+# target + decoupled centerness branch with a CenterPoint/CenterNet-style soft
+# Gaussian heatmap target (sigma in meters, GAUSSIAN_SIGMA_M) trained with the
+# penalty-reduced focal loss (models/losses.py::focal_heatmap_loss) --
+# reusing the mechanism this project's own original pre-FCAF3D dense head
+# already used, rather than FCAF3D's own hard-target + separate-centerness
+# design. Centerness is dropped from the loss and from decode()'s score
+# (score = sigmoid(exist_logit) alone) -- see detector_fcaf3d.py's
+# GAUSSIAN_HEATMAP docstring.
+BASE_CONFIG: exp_fcaf3d_single_level.yaml
+
+FCAF3D_HEAD:
+  GAUSSIAN_HEATMAP: true
+  GAUSSIAN_SIGMA_M: 0.5

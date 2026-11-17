@@ -1,0 +1,248 @@
+import argparse
+import csv
+import os
+import time
+from pathlib import Path
+
+# Must be set before the first CUDA call (torch import triggers context init on
+# some setups, but setting it before `import torch` is the safe order either
+# way). Without this, the caching allocator's reserved-memory pool creeps up
+# over hundreds of steps on this project's wildly variable per-batch active-
+# voxel counts instead of reusing already-reserved blocks (measured on RTX
+# 2070/Linux-style allocator: BATCH_SIZE=16 on exp_sparse_no_slotformer.yaml
+# ran away past 10GiB reserved by step 100 without this, vs. a flat 6.3GiB
+# with it). CUDACachingAllocator prints "expandable_segments not supported on
+# this platform" and silently no-ops THIS on Windows, though -- every
+# exp_*.yaml's BATCH_SIZE was measured without it actually active (i.e. the
+# Windows-real number), so don't bump batch sizes assuming this is helping
+# unless you've confirmed it's not printing that warning.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
+import torch
+from torch.utils.data import DataLoader
+from tqdm import tqdm
+
+import models.slotformer as slotformer
+from config_utils import load_config
+from data.dataset import SonarDiverDataset, collate_fn
+from models.detector import DiverDetector
+
+LOSS_KEYS = ["total", "center", "corner_aux", "offset", "size", "rotation"]
+
+
+class LossLogger:
+    """Appends one CSV row per train step and per val epoch to `path` (put it
+    under --ckpt_dir so it survives a Colab session the same way checkpoints
+    do). Kept as one file with a `phase` column rather than separate
+    train/val files, and flushed every row -- this is exactly the kind of
+    data a disconnect mid-run shouldn't lose. Column order: phase, epoch,
+    step, lr, n_pos, then LOSS_KEYS. Reopening an existing file appends
+    instead of overwriting, so it's resume-safe without any extra bookkeeping."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        is_new = not self.path.exists()
+        self.file = open(self.path, "a", newline="")
+        self.writer = csv.writer(self.file)
+        if is_new:
+            self.writer.writerow(["phase", "epoch", "step", "lr", "n_pos"] + LOSS_KEYS)
+            self.file.flush()
+
+    def log_train_step(self, epoch, step, losses, lr, n_pos):
+        self.writer.writerow(["train", epoch, step, lr, n_pos] + [losses[k].item() for k in LOSS_KEYS])
+        self.file.flush()
+
+    def log_val_epoch(self, epoch, step, avg_losses):
+        self.writer.writerow(["val", epoch, step, "", ""] + [avg_losses[k] for k in LOSS_KEYS])
+        self.file.flush()
+
+    def close(self):
+        self.file.close()
+
+
+def build_dataloader(cfg, split, batch_size, shuffle, num_workers):
+    ds = SonarDiverDataset(cfg, split)
+    return DataLoader(
+        ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers,
+        collate_fn=collate_fn, drop_last=shuffle,  # drop_last only for train (shuffle=True)
+        pin_memory=True, persistent_workers=(num_workers > 0),
+    )
+
+
+def save_checkpoint(path, model, optimizer, scheduler, epoch, step, cfg, epoch_complete):
+    """epoch_complete=True only when saved *after* finishing all of `epoch`'s
+    batches (the epoch-boundary checkpoints). Step-checkpoints save mid-epoch;
+    train_detr.py's --resume skips that many already-trained batches when
+    resuming one (train.py's own resume path still just re-runs the whole
+    epoch -- there's no equivalent skip logic there).
+
+    Writes to a temp file and os.replace()s it into place -- os.replace is
+    atomic (same filesystem), so a hard-killed process (e.g. a foreground
+    training chunk hitting Bash's `timeout`, see train_detr.py's own comment
+    on why long runs here are chunked) can only ever leave behind an orphaned
+    .tmp file, never a truncated/corrupted checkpoint at `path` itself. Hit
+    this for real: a `timeout`-killed chunk left a ~150MB checkpoint where
+    every other one was ~233MB, and torch.load failed on it with a zip
+    central-directory error."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    torch.save({
+        "model": model.state_dict(),
+        "optimizer": optimizer.state_dict(),
+        "scheduler": scheduler.state_dict(),
+        "epoch": epoch,
+        "step": step,
+        "epoch_complete": epoch_complete,
+        "cfg": cfg,
+        "attention_kind": slotformer.ATTENTION_KIND,
+    }, tmp_path)
+    os.replace(tmp_path, path)
+
+
+@torch.no_grad()
+def run_validation(model, val_loader, device):
+    """Returns per-component averages (not just total) so the loss history
+    log can show val trends per term too -- useful for spotting a term that's
+    overfitting differently from the others when it's time to retune weights."""
+    model.eval()
+    sums = {k: 0.0 for k in LOSS_KEYS}
+    n = 0
+    for batch in val_loader:
+        losses, _, _, _ = model.loss(batch, device)
+        for k in LOSS_KEYS:
+            sums[k] += losses[k].item()
+        n += 1
+    model.train()
+    n = max(n, 1)
+    return {k: v / n for k, v in sums.items()}
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="configs/default.yaml")
+    parser.add_argument("--ckpt_dir", default="checkpoints")
+    parser.add_argument("--resume", default=None, help="path to a checkpoint to resume from")
+    parser.add_argument("--epochs", type=int, default=None, help="override OPTIMIZATION.NUM_EPOCHS")
+    parser.add_argument("--exp_name", default=None,
+                         help="prefix for loss_history/checkpoint filenames (default: the config file's stem, "
+                              "e.g. configs/exp_sparse_slotformer_3l.yaml -> exp_sparse_slotformer_3l)")
+    parser.add_argument("--log_file", default=None, help="defaults to <ckpt_dir>/<exp_name>_loss_history.csv")
+    parser.add_argument("--attention_kind", choices=["softmax", "linear"], default=None,
+                         help="override models.slotformer.ATTENTION_KIND (default: whatever's hardcoded there)")
+    args = parser.parse_args()
+
+    exp_name = args.exp_name or Path(args.config).stem
+    print(f"exp_name: {exp_name}")
+
+    if args.attention_kind:
+        slotformer.ATTENTION_KIND = args.attention_kind
+    print(f"SlotFormer attention kind: {slotformer.ATTENTION_KIND}")
+
+    cfg = load_config(args.config)
+
+    opt_cfg = cfg["OPTIMIZATION"]
+    num_epochs = args.epochs or opt_cfg["NUM_EPOCHS"]
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f"device: {device}")
+    if device.type == "cpu":
+        print("WARNING: no CUDA GPU found -- this will be very slow. Intended to run on Colab.")
+
+    train_loader = build_dataloader(cfg, "train", opt_cfg["BATCH_SIZE"], shuffle=True, num_workers=opt_cfg["NUM_WORKERS"])
+    val_loader = build_dataloader(cfg, "val", opt_cfg["BATCH_SIZE"], shuffle=False, num_workers=opt_cfg["NUM_WORKERS"])
+    print(f"train batches/epoch: {len(train_loader)}  val batches: {len(val_loader)}")
+
+    model = DiverDetector(cfg).to(device)
+
+    optimizer = torch.optim.AdamW(model.parameters(), lr=opt_cfg["LR"], weight_decay=opt_cfg["WEIGHT_DECAY"])
+    steps_per_epoch = len(train_loader)
+    # No slack buffer needed here (unlike an earlier version of this file): a
+    # mid-epoch resume re-runs that epoch's steps, which used to risk exceeding
+    # steps_per_epoch*num_epochs and crashing OneCycleLR -- but the scheduler
+    # below is now rebuilt fresh at resume time (see the last_epoch= comment),
+    # sized off *this* run's steps_per_epoch, so it can no longer inherit a
+    # stale/too-small total_steps from a checkpoint at all.
+    total_steps = steps_per_epoch * num_epochs
+
+    start_epoch, global_step = 0, 0
+    ckpt = None
+    if args.resume:
+        ckpt = torch.load(args.resume, map_location=device)
+        model.load_state_dict(ckpt["model"])
+        optimizer.load_state_dict(ckpt["optimizer"])
+        start_epoch = ckpt["epoch"] + 1 if ckpt.get("epoch_complete") else ckpt["epoch"]
+        global_step = ckpt["step"]
+        if not args.attention_kind and ckpt.get("attention_kind"):
+            slotformer.ATTENTION_KIND = ckpt["attention_kind"]  # keep resumed run consistent with how it was trained
+        print(f"resumed from {args.resume} at epoch {start_epoch}, step {global_step} "
+              f"(epoch_complete={ckpt.get('epoch_complete')}, attention_kind={slotformer.ATTENTION_KIND})")
+
+    # Built AFTER knowing global_step, and sized off *this* run's steps_per_epoch
+    # (not loaded from the checkpoint's scheduler state) -- deliberately, so that
+    # resuming after the dataset/config changed (different steps_per_epoch, e.g.
+    # scenes added or the split changed) can't inherit a stale, now-too-small
+    # total_steps and crash once global_step runs past it. Passing last_epoch
+    # instead of scheduler.load_state_dict() puts the scheduler's counter at the
+    # right position while its total_steps/phase boundaries reflect the current
+    # run. This does mean the LR curve reshapes around the new total_steps on
+    # resume rather than continuing the exact old curve -- an unavoidable
+    # consequence of the schedule length actually changing, not a bug.
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer, max_lr=opt_cfg["LR"], total_steps=total_steps,
+        pct_start=opt_cfg["PCT_START"], div_factor=opt_cfg["DIV_FACTOR"],
+        base_momentum=opt_cfg["MOMS"][1], max_momentum=opt_cfg["MOMS"][0],
+        last_epoch=(global_step - 1) if ckpt is not None else -1,
+    )
+
+    ckpt_dir = Path(args.ckpt_dir)
+    ckpt_every_epochs = opt_cfg["CKPT_EVERY_N_EPOCHS"]
+    ckpt_every_steps = opt_cfg["CKPT_EVERY_N_STEPS"]
+    log_path = Path(args.log_file) if args.log_file else ckpt_dir / f"{exp_name}_loss_history.csv"
+    logger = LossLogger(log_path)
+    print(f"logging per-step/per-epoch losses to {log_path}")
+
+    model.train()
+    for epoch in range(start_epoch, num_epochs):
+        epoch_t0 = time.time()
+        running_loss = 0.0
+        pbar = tqdm(train_loader, desc=f"epoch {epoch}/{num_epochs - 1}")
+        for batch in pbar:
+            losses, _, _, assign_result = model.loss(batch, device)
+            optimizer.zero_grad()
+            losses["total"].backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), opt_cfg["GRAD_NORM_CLIP"])
+            optimizer.step()
+            scheduler.step()
+            global_step += 1
+            running_loss += losses["total"].item()
+            lr = scheduler.get_last_lr()[0]
+            n_pos = int(assign_result["pos_mask"].sum().item())
+            logger.log_train_step(epoch, global_step, losses, lr, n_pos)
+
+            pbar.set_postfix({
+                "loss": f"{losses['total'].item():.3f}",
+                "center": f"{losses['center'].item():.3f}",
+                "n_pos": n_pos,
+                "lr": f"{lr:.2e}",
+            })
+
+            if ckpt_every_steps and global_step % ckpt_every_steps == 0:
+                save_checkpoint(ckpt_dir / f"{exp_name}_step_{global_step}.pth", model, optimizer, scheduler, epoch, global_step, cfg, epoch_complete=False)
+
+        epoch_time = time.time() - epoch_t0
+        avg_train_loss = running_loss / max(len(train_loader), 1)
+        val_losses = run_validation(model, val_loader, device)
+        logger.log_val_epoch(epoch, global_step, val_losses)
+        print(f"epoch {epoch}: train_loss={avg_train_loss:.4f} val_loss={val_losses['total']:.4f} time={epoch_time:.1f}s")
+
+        if ckpt_every_epochs and (epoch + 1) % ckpt_every_epochs == 0:
+            save_checkpoint(ckpt_dir / f"{exp_name}_epoch_{epoch}.pth", model, optimizer, scheduler, epoch, global_step, cfg, epoch_complete=True)
+
+    save_checkpoint(ckpt_dir / f"{exp_name}_last.pth", model, optimizer, scheduler, num_epochs - 1, global_step, cfg, epoch_complete=True)
+    logger.close()
+    print("training complete.")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,122 @@
+import torch
+
+from .box_utils import corner_distance_cost, points_in_oriented_box
+
+TOPQ = 10  # SimOTA-style: dynamic-k comes from the sum of the top-`TOPQ` quality scores
+
+
+class DynamicLabelAssigner:
+    """FSHNet DCLA-style assignment, SimOTA-shaped: the candidate pool per GT
+    is voxels whose center falls inside that GT's own (oriented) box -- using
+    only the GT's own center/size/quaternion to define the region, same as
+    SimOTA's "candidates inside the GT box" filter -- with a nearest-voxel
+    fallback if the box is smaller than a voxel (so MIN_POSITIVES stays
+    satisfiable). The cost/quality metric is still corner-distance instead of
+    IoU, since RWIoU assumes yaw-only rotation and our boxes carry a full
+    quaternion.
+
+    cost = cls_weight * (1 - cls_score) + reg_weight * corner_distance
+    "quality" for the dynamic-k estimate is exp(-corner_distance), a bounded
+    (0,1] stand-in for the IoU quality score SimOTA/FSHNet use natively.
+    """
+
+    def __init__(self, cfg, pc_range, effective_voxel_size):
+        self.cls_weight = cfg["CLS_WEIGHT"]
+        self.reg_weight = cfg["REG_WEIGHT"]
+        self.min_positives = cfg["MIN_POSITIVES"]
+        self.pc_range = pc_range
+        self.effective_voxel_size = effective_voxel_size
+
+    def voxel_world_centers(self, coords):
+        xyz_idx = coords[:, 1:4].float()
+        return self.pc_range[:3].to(coords.device) + (xyz_idx + 0.5) * self.effective_voxel_size.to(coords.device)
+
+    def assign(self, pred, coords, gt_boxes_list):
+        """When two GT objects are close enough that a voxel is a good candidate
+        for both, it goes to whichever one it's actually a better regression
+        match for (lowest cost), not whichever object happened to be processed
+        last in the loop below."""
+        device = coords.device
+        n = coords.shape[0]
+        voxel_centers = self.voxel_world_centers(coords)
+        pred_center = voxel_centers + pred["offset"]
+        pred_size = pred["box"][:, :3].exp()
+        pred_quat = pred["box"][:, 3:7]
+        cls_score = torch.sigmoid(pred["center_logit"].squeeze(-1))
+
+        pos_mask = torch.zeros(n, dtype=torch.bool, device=device)
+        target_center = torch.zeros(n, 3, device=device)
+        target_size = torch.zeros(n, 3, device=device)
+        target_quat = torch.zeros(n, 4, device=device)
+        target_quat[:, 0] = 1.0
+        assigned_gt = torch.full((n,), -1, dtype=torch.long, device=device)
+        best_cost = torch.full((n,), float("inf"), device=device)
+
+        for b, gt_boxes in enumerate(gt_boxes_list):
+            if gt_boxes.shape[0] == 0:
+                continue
+            gt_boxes = gt_boxes.to(device)
+            batch_idx = (coords[:, 0] == b).nonzero(as_tuple=True)[0]
+            if batch_idx.numel() == 0:
+                continue
+
+            for oi in range(gt_boxes.shape[0]):
+                gt = gt_boxes[oi]
+
+                # SimOTA-style spatial filter: candidates are voxels whose
+                # center actually lies inside this GT's own oriented box --
+                # nothing but the GT's own center/size/quat decides this.
+                in_box = points_in_oriented_box(voxel_centers[batch_idx], gt[:3], gt[3:6], gt[6:10])
+                cand_idx = batch_idx[in_box]
+                if cand_idx.numel() == 0:
+                    # box smaller than a voxel, or straddling voxel centers --
+                    # fall back to the single nearest voxel so MIN_POSITIVES
+                    # is still satisfiable instead of this GT getting nothing.
+                    dists = (voxel_centers[batch_idx] - gt[:3].unsqueeze(0)).norm(dim=-1)
+                    cand_idx = batch_idx[dists.argmin().unsqueeze(0)]
+
+                m = cand_idx.shape[0]
+                gt_center = gt[:3].unsqueeze(0).expand(m, 3)
+                gt_size = gt[3:6].unsqueeze(0).expand(m, 3)
+                gt_quat = gt[6:10].unsqueeze(0).expand(m, 4)
+
+                reg_cost = corner_distance_cost(
+                    pred_center[cand_idx], pred_size[cand_idx], pred_quat[cand_idx],
+                    gt_center, gt_size, gt_quat,
+                )
+                cls_cost = 1.0 - cls_score[cand_idx]
+                cost = self.cls_weight * cls_cost + self.reg_weight * reg_cost
+
+                quality = torch.exp(-reg_cost)
+                q = min(TOPQ, quality.shape[0])
+                topq_vals, _ = torch.topk(quality, q)
+                dynamic_k = max(self.min_positives, int(topq_vals.sum().floor().item()))
+                dynamic_k = min(dynamic_k, cost.shape[0])
+
+                topk_costs, topk_local = torch.topk(cost, dynamic_k, largest=False)
+                sel = cand_idx[topk_local]
+
+                # only claim voxels this object beats the current owner on --
+                # a voxel already better-explained by another nearby object
+                # keeps that assignment instead of being blindly overwritten.
+                win = topk_costs < best_cost[sel]
+                sel = sel[win]
+                if sel.numel() == 0:
+                    continue
+                best_cost[sel] = topk_costs[win]
+                pos_mask[sel] = True
+                target_center[sel] = gt[:3]
+                target_size[sel] = gt[3:6]
+                target_quat[sel] = gt[6:10]
+                assigned_gt[sel] = oi
+
+        return {
+            "pos_mask": pos_mask,
+            "target_center": target_center,
+            "target_size": target_size,
+            "target_quat": target_quat,
+            "assigned_gt": assigned_gt,
+            "pred_center": pred_center,
+            "pred_size": pred_size,
+            "pred_quat": pred_quat,
+        }
